@@ -2,7 +2,11 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
+import imageio_ffmpeg
 from pyrogram import Client, filters
+
+# 🎯 الحصول على مسار FFmpeg الثابت والجاهز تلقائياً
+FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
 
 # 🔒 جلب البيانات من متغيرات البيئة (Railway Variables)
 try:
@@ -39,23 +43,21 @@ async def collect_media(client, message):
             photo_path = await message.download()
             temp_video_path = f"img_video_{message.id}_{user_id}.mp4"
             
-            # أمر FFmpeg لتحويل الصورة إلى فيديو لمدة 3 ثوانٍ
+            # تحويل الصورة إلى فيديو باستخدام مسار FFMPEG_BIN المضمون
             convert_cmd = [
-                "ffmpeg", "-loop", "1", "-i", photo_path,
+                FFMPEG_BIN, "-loop", "1", "-i", photo_path,
                 "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # أبعاد زوجية متوافقة
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 temp_video_path, "-y"
             ]
             
             subprocess.run(convert_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            # حذف الصورة الأصلية والإبقاء على الفيديو المحول
             if os.path.exists(photo_path):
                 os.remove(photo_path)
                 
             file_path = temp_video_path
         else:
-            # إذا كان المقطع فيديو عادي
             file_path = await message.download()
 
         USER_VIDEOS[user_id].append(file_path)
@@ -91,15 +93,14 @@ async def merge_videos(client, message):
     output_video_path = f"merged_{user_id}.mp4"
 
     try:
-        # إنشاء ملف النص المطلوبة لأداة FFmpeg
         with open(list_file_path, "w", encoding="utf-8") as f:
             for path in video_list:
                 abs_path = os.path.abspath(path).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
-        # أمر FFmpeg للدمج
+        # أمر FFmpeg للدمج بمسار FFMPEG_BIN المضمون
         command = [
-            "ffmpeg", "-f", "concat", "-safe", "0",
+            FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
             "-c", "copy",
             output_video_path, "-y"
@@ -123,7 +124,7 @@ async def merge_videos(client, message):
         await msg.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
 
     finally:
-        # 🧹 تنظيف السيرفر وحذف جميع الملفات المؤقتة
+        # 🧹 تنظيف السيرفر
         for path in video_list:
             if os.path.exists(path):
                 os.remove(path)
