@@ -24,7 +24,6 @@ if not all([API_ID, API_HASH, BOT_TOKEN]):
 
 app = Client("video_merger_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# تخزين الملفات مع تفاصيل المدة والنوع
 USER_VIDEOS = defaultdict(list)
 
 def has_audio(file_path):
@@ -34,17 +33,18 @@ def has_audio(file_path):
     return "Audio:" in res.stderr
 
 def get_video_duration(video_path):
-    """استخراج مدة الملف بالثواني بدقة"""
+    """استخراج مدة الفيديو بالثواني بدقة مرنة تمنع القراءة الصفريّة"""
     cmd_info = [FFMPEG_BIN, "-i", video_path]
     res = subprocess.run(cmd_info, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    dur_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", res.stderr)
+    
+    dur_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", res.stderr)
     if dur_match:
         h, m, s = dur_match.groups()
         return int(float(h) * 3600 + float(m) * 60 + float(s))
     return 0
 
 def get_video_metadata_and_thumb(video_path, thumb_path):
-    """استخراج الصورة المصغرة والأبعاد والمدة"""
+    """استخراج الغلاف والأبعاد والمدة"""
     cmd_thumb = [
         FFMPEG_BIN, "-ss", "00:00:00.500", "-i", video_path,
         "-vframes", "1", thumb_path, "-y"
@@ -67,7 +67,7 @@ def get_video_metadata_and_thumb(video_path, thumb_path):
     return duration, width, height
 
 
-# 1️⃣ استلام الملفات وتوحيد الخصائص
+# 1️⃣ استلام الملفات وإجبار إضافتها مهما كانت صيغتها
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def collect_media(client, message):
     user_id = message.from_user.id
@@ -77,7 +77,7 @@ async def collect_media(client, message):
         if not (mime.startswith("video/") or mime.startswith("audio/")):
             return
 
-    msg = await message.reply_text("⏳ جاري تجهيز العنصر وتوحيد الخصائص على 60 FPS...")
+    msg = await message.reply_text("⏳ جاري تحميل وإصلاح وتجهيز العنصر...")
 
     try:
         raw_file_path = await message.download()
@@ -85,9 +85,18 @@ async def collect_media(client, message):
 
         vf_scale_no_stretch = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1"
         media_type = "فيديو"
+        
+        telegram_duration = 0
+        if message.video and message.video.duration:
+            telegram_duration = message.video.duration
+        elif message.audio and message.audio.duration:
+            telegram_duration = message.audio.duration
+        elif message.voice and message.voice.duration:
+            telegram_duration = message.voice.duration
 
         if message.photo:
             media_type = "صورة"
+            telegram_duration = 3
             cmd = [
                 FFMPEG_BIN, "-loop", "1", "-i", raw_file_path,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
@@ -107,9 +116,10 @@ async def collect_media(client, message):
                 processed_video_path, "-y"
             ]
         else:
+            # تجاهل الأخطاء البرمجية للمقاطع التالفة وتمريرها بالكامل (-err_detect ignore_err)
             if has_audio(raw_file_path):
                 cmd = [
-                    FFMPEG_BIN, "-i", raw_file_path,
+                    FFMPEG_BIN, "-err_detect", "ignore_err", "-i", raw_file_path,
                     "-c:v", "libx264", "-r", "60", "-pix_fmt", "yuv420p",
                     "-vf", vf_scale_no_stretch,
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
@@ -117,7 +127,7 @@ async def collect_media(client, message):
                 ]
             else:
                 cmd = [
-                    FFMPEG_BIN, "-i", raw_file_path,
+                    FFMPEG_BIN, "-err_detect", "ignore_err", "-i", raw_file_path,
                     "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-c:v", "libx264", "-r", "60", "-pix_fmt", "yuv420p",
                     "-vf", vf_scale_no_stretch,
@@ -132,6 +142,8 @@ async def collect_media(client, message):
             os.remove(raw_file_path)
 
         dur = get_video_duration(processed_video_path)
+        if dur == 0:
+            dur = telegram_duration if telegram_duration > 0 else 1
 
         USER_VIDEOS[user_id].append({
             "path": processed_video_path,
@@ -145,16 +157,16 @@ async def collect_media(client, message):
         await msg.edit_text(
             f"✅ **تمت إضافة العنصر رقم ({count}) بنجاح!**\n"
             f"📌 **النوع:** {media_type} | **المدة:** {dur} ثانية\n"
-            f"⏱️ **إجمالي مدة التجميع الآن:** {total_sec // 60} دقيقة و {total_sec % 60} ثانية\n\n"
+            f"⏱️ **إجمالي المدة الآن:** {total_sec // 60} دقيقة و {total_sec % 60} ثانية\n\n"
             f"• أرسل **show** أو `/show` لرؤية القائمة التفصيلية.\n"
             f"• أرسل **دمج** أو `/merge` للجمع النهائي.\n"
             f"• أرسل `/clear` للتفريغ."
         )
     except Exception as e:
-        await msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {e}")
+        await msg.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
 
 
-# 2️⃣ أمر عرض تفاصيل العناصر المضافة (show / عرض)
+# 2️⃣ عرض تفاصيل القائمة (show / عرض)
 @app.on_message(filters.private & (filters.command(["show", "عرض"]) | filters.regex(r"^(show|عرض|المقاطع)$")))
 async def show_list(client, message):
     user_id = message.from_user.id
@@ -176,7 +188,7 @@ async def show_list(client, message):
     await message.reply_text(text)
 
 
-# 3️⃣ عملية الدمج النهائية المحسنة
+# 3️⃣ عملية الدمج النهائية
 @app.on_message(filters.private & (filters.command(["merge", "دمج"]) | filters.regex(r"^دمج$")))
 async def merge_videos(client, message):
     user_id = message.from_user.id
@@ -191,7 +203,7 @@ async def merge_videos(client, message):
         return
 
     total_sec = sum(item["duration"] for item in video_list)
-    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عناصر (المدة المتوقعة: {total_sec // 60} دقيقة و {total_sec % 60} ثانية)...")
+    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عناصر (المدة الكلية: {total_sec // 60} دقيقة و {total_sec % 60} ثانية)...")
 
     list_file_path = f"list_{user_id}.txt"
     output_video_path = f"merged_{user_id}.mp4"
@@ -203,7 +215,6 @@ async def merge_videos(client, message):
                 abs_path = os.path.abspath(item["path"]).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
-        # تم حذف -c copy واستبداله بـ libx264 لربط مقاطع الصور والفيديو في خط زمني موحد دون انقطاع عند 3 ثواني
         command = [
             FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
@@ -219,9 +230,11 @@ async def merge_videos(client, message):
             await msg.edit_text("❌ حدث خطأ أثناء عملية الدمج.")
             return
 
-        await msg.edit_text("📤 جاريرفع المقطع النهائي...")
+        await msg.edit_text("📤 جاري رفع المقطع النهائي...")
 
         duration, width, height = get_video_metadata_and_thumb(output_video_path, thumb_path)
+        if duration == 0:
+            duration = total_sec
 
         await client.send_video(
             chat_id=user_id,
@@ -274,5 +287,5 @@ async def clear_videos(client, message):
 
 
 if __name__ == "__main__":
-    print("🤖 Bot is running with Show Command & Fixed Duration Merge...")
+    print("🤖 Bot is running with Force Accept Mode...")
     app.run()
