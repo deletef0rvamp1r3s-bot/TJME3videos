@@ -1,4 +1,2 @@
 pyrogram
 tgcrypto
-flask
-gradio_client
