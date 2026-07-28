@@ -26,9 +26,14 @@ app = Client("video_merger_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT
 
 USER_VIDEOS = defaultdict(list)
 
+def has_audio(file_path):
+    """التحقق مما إذا كان الملف يحتوي على مسار صوتي"""
+    cmd = [FFMPEG_BIN, "-i", file_path]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return "Audio:" in res.stderr
 
 def get_video_metadata_and_thumb(video_path, thumb_path):
-    """استخراج الصورة المصغرة وأبعاد الفيديو ومدته بدقة"""
+    """استخراج الصورة المصغرة وأبعاد الفيديو ومدته"""
     cmd_thumb = [
         FFMPEG_BIN, "-ss", "00:00:00.500", "-i", video_path,
         "-vframes", "1", thumb_path, "-y"
@@ -56,7 +61,7 @@ def get_video_metadata_and_thumb(video_path, thumb_path):
     return duration, width, height
 
 
-# 1️⃣ استلام الملفات (فيديو، صورة، أو صوت) وتوحيد خصائصها هندسياً
+# 1️⃣ استلام الملفات (فيديو، صورة، أو صوت) وتوحيدها على 60 فريم وبدون سترتش
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def collect_media(client, message):
     user_id = message.from_user.id
@@ -66,47 +71,58 @@ async def collect_media(client, message):
         if not (mime.startswith("video/") or mime.startswith("audio/")):
             return
 
-    msg = await message.reply_text("⏳ جاري معالجة وتجهيز العنصر للدمج السليم...")
+    msg = await message.reply_text("⏳ جاري المعالجة وتوحيد الخصائص على 60 فريم...")
 
     try:
         raw_file_path = await message.download()
         processed_video_path = f"processed_{message.id}_{user_id}.mp4"
 
-        # تحديد نوع الملف ومعالجته ليتوافق تماماً في الصوت والصورة والقياسات (9:16)
+        # الفلتر البرمجي لعدم السواتش (الحفاظ على الأبعاد مع هوامش سوداء عند الحاجة + 60 فريم)
+        vf_scale_no_stretch = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60"
+
         if message.photo:
-            # معالجة الصور: تحويلها لفيديو 3 ثوانٍ مع صوت صامت وأبعاد 9:16 بدون سترتش
+            # صورة: تحويلها لفيديو 3 ثوانٍ بـ 60 فريم وصوت صامت
             cmd = [
                 FFMPEG_BIN, "-loop", "1", "-i", raw_file_path,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
-                "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1",
-                "-c:a", "aac", "-shortest",
+                "-vf", vf_scale_no_stretch,
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
                 processed_video_path, "-y"
             ]
         elif message.audio or message.voice:
-            # لو أرسل ملف صوتي منفصل: نحوله لفيديو بشاشة سوداء بنفس مدة الصوت
+            # صوت: تحويله لفيديو شاشة سوداء 60 فريم بنفس مدة الصوت
             cmd = [
-                FFMPEG_BIN, "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                FFMPEG_BIN, "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                 "-i", raw_file_path,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-shortest",
+                "-vf", "setsar=1,fps=60",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
                 processed_video_path, "-y"
             ]
         else:
-            # معالجة الفيديوهات: توحيد الأبعاد (9:16 بدون سترتش) وضمان وجود مسار صوتي (حتى لو كان صامتاً لمقاطع الميوت)
-            cmd = [
-                FFMPEG_BIN, "-i", raw_file_path,
-                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1",
-                "-c:a", "aac", "-map", "0:v:0?", "-map", "1:a:0",
-                "-shortest",
-                processed_video_path, "-y"
-            ]
+            # فيديو: توحيد الأبعاد ومنع السترش + 60 فريم + إضافة صوت صامت إذا كان الفيديو الأصل بدون صوت
+            if has_audio(raw_file_path):
+                cmd = [
+                    FFMPEG_BIN, "-i", raw_file_path,
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-vf", vf_scale_no_stretch,
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    processed_video_path, "-y"
+                ]
+            else:
+                cmd = [
+                    FFMPEG_BIN, "-i", raw_file_path,
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-vf", vf_scale_no_stretch,
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-map", "0:v:0", "-map", "1:a:0",
+                    "-shortest",
+                    processed_video_path, "-y"
+                ]
 
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # حذف الملف الخام والاحتفاظ بالملف المعالج
         if os.path.exists(raw_file_path):
             os.remove(raw_file_path)
 
@@ -114,7 +130,8 @@ async def collect_media(client, message):
 
         count = len(USER_VIDEOS[user_id])
         await msg.edit_text(
-            f"✅ **تمت إضافة العنصر رقم ({count}) بنجاح وتوحيد خصائصه!**\n\n"
+            f"✅ **تمت إضافة العنصر رقم ({count}) بنجاح!**\n"
+            f"🎬 **السرعة:** 60 FPS | **الأبعاد:** بدون سترتش\n\n"
             f"• أرسل المزيد من المقاطع أو الصور.\n"
             f"• أرسل كلمة **دمج** أو أمر `/merge` لجمعها.\n"
             f"• أرسل `/clear` للتفريغ."
@@ -123,7 +140,7 @@ async def collect_media(client, message):
         await msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {e}")
 
 
-# 2️⃣ عملية دمج الملفات الموحدة تماماً
+# 2️⃣ عملية دمج الملفات الموحدة
 @app.on_message(filters.private & (filters.command(["merge", "دمج"]) | filters.regex(r"^دمج$")))
 async def merge_videos(client, message):
     user_id = message.from_user.id
@@ -137,7 +154,7 @@ async def merge_videos(client, message):
         await message.reply_text("⚠️ يجب إرسال عنصرين على الأقل لدمجهما!")
         return
 
-    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عنصر بشكل نهائي...")
+    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عنصر بـ 60 فريم...")
 
     list_file_path = f"list_{user_id}.txt"
     output_video_path = f"merged_{user_id}.mp4"
@@ -149,28 +166,28 @@ async def merge_videos(client, message):
                 abs_path = os.path.abspath(path).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
-        # دمج آمن ومستقر 100% يدعم اختلاف الصوت والصورة ويضبط العداد الزمني بدقة
+        # الدمج المباشر السريع لأن الخصائص موحدة 100%
         command = [
             FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
-            "-c:v", "libx264", "-c:a", "aac",
+            "-c", "copy",
             output_video_path, "-y"
         ]
 
         process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         if process.returncode != 0:
-            await msg.edit_text("❌ حدث خطأ أثناء عملية الدمج النهائية.")
+            await msg.edit_text("❌ حدث خطأ أثناء عملية الدمج.")
             return
 
-        await msg.edit_text("📤 جاري استخراج الغلاف وإرسال المقطع الكامل...")
+        await msg.edit_text("📤 جاري رفع المقطع النهائي...")
 
         duration, width, height = get_video_metadata_and_thumb(output_video_path, thumb_path)
 
         await client.send_video(
             chat_id=user_id,
             video=output_video_path,
-            caption=f"✅ **تم دمج {len(video_list)} عنصر بنجاح وبدون أي مشاكل في الوقت أو الصوت!**",
+            caption=f"✅ **تم دمج {len(video_list)} عنصر بنجاح!**\n⚡ **المعدل:** 60 FPS",
             duration=duration,
             width=width,
             height=height,
@@ -189,7 +206,7 @@ async def merge_videos(client, message):
         if os.path.exists(output_video_path):
             os.remove(output_video_path)
         if os.path.exists(thumb_path):
-            os.path.exists(thumb_path) and os.remove(thumb_path)
+            os.remove(thumb_path)
 
         USER_VIDEOS[user_id] = []
         try:
@@ -198,7 +215,7 @@ async def merge_videos(client, message):
             pass
 
 
-# 3️⃣ مسح القائمة والتراجع
+# 3️⃣ تفريغ القائمة
 @app.on_message(filters.private & (filters.command(["clear", "مسح", "إلغاء"]) | filters.regex(r"^(تفريغ|إلغاء|الغاء)$")))
 async def clear_videos(client, message):
     user_id = message.from_user.id
@@ -209,9 +226,9 @@ async def clear_videos(client, message):
             os.remove(path)
 
     USER_VIDEOS[user_id] = []
-    await message.reply_text("🗑️ تم مسح جميع العناصر المحفوظة، يمكنك البدء من جديد!")
+    await message.reply_text("🗑️ تم مسح جميع العناصر، يمكنك البدء من جديد!")
 
 
 if __name__ == "__main__":
-    print("🤖 Pro Video & Audio Merger Bot is running...")
+    print("🤖 Bot is running with 60 FPS...")
     app.run()
