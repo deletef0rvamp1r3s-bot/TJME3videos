@@ -1,11 +1,12 @@
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
 import imageio_ffmpeg
 from pyrogram import Client, filters
 
-# 🎯 الحصول على مسار FFmpeg الثابت والجاهز تلقائياً
+# 🎯 الحصول على مسار FFmpeg الثابت تلقائياً
 FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
 
 # 🔒 جلب البيانات من متغيرات البيئة (Railway Variables)
@@ -26,24 +27,55 @@ app = Client("video_merger_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT
 USER_VIDEOS = defaultdict(list)
 
 
+def get_video_metadata_and_thumb(video_path, thumb_path):
+    """استخراج الصورة المصغرة (Thumbnail) وأبعاد الفيديو ومدته لمنع التمطيط واختفاء الغلاف"""
+    # 1. استخراج صورة مصغرة (Thumbnail) من أول ثانية
+    cmd_thumb = [
+        FFMPEG_BIN, "-ss", "00:00:00.500", "-i", video_path,
+        "-vframes", "1", thumb_path, "-y"
+    ]
+    subprocess.run(cmd_thumb, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # 2. قراءة بيانات الفيديو باستخدام FFmpeg
+    cmd_info = [FFMPEG_BIN, "-i", video_path]
+    res = subprocess.run(cmd_info, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stderr = res.stderr
+
+    duration = 0
+    width = 0
+    height = 0
+
+    # استخراج مدة الفيديو
+    dur_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", stderr)
+    if dur_match:
+        h, m, s = dur_match.groups()
+        duration = int(float(h) * 3600 + float(m) * 60 + float(s))
+
+    # استخراج أبعاد الفيديو (العرض × الارتفاع)
+    res_match = re.search(r"Video:.*?\b(\d{3,4})x(\d{3,4})\b", stderr)
+    if res_match:
+        width = int(res_match.group(1))
+        height = int(res_match.group(2))
+
+    return duration, width, height
+
+
 # 1️⃣ استلام المقاطع والصور وحفظها بالترتيب
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo))
 async def collect_media(client, message):
     user_id = message.from_user.id
 
-    # التأكد من أن المستند أرسل كفيديو لو كان Document
     if message.document and not (message.document.mime_type or "").startswith("video/"):
         return
 
     msg = await message.reply_text("⏳ جاري حفظ وتجهيز الملف...")
 
     try:
-        # إذا أرسل المستخدم صورة: نحولها إلى مقطع فيديو مدته 3 ثوانٍ
         if message.photo:
             photo_path = await message.download()
             temp_video_path = f"img_video_{message.id}_{user_id}.mp4"
             
-            # تحويل الصورة إلى فيديو باستخدام مسار FFMPEG_BIN المضمون
+            # تحويل الصورة إلى فيديو
             convert_cmd = [
                 FFMPEG_BIN, "-loop", "1", "-i", photo_path,
                 "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
@@ -91,6 +123,7 @@ async def merge_videos(client, message):
 
     list_file_path = f"list_{user_id}.txt"
     output_video_path = f"merged_{user_id}.mp4"
+    thumb_path = f"thumb_{user_id}.jpg"
 
     try:
         with open(list_file_path, "w", encoding="utf-8") as f:
@@ -98,7 +131,6 @@ async def merge_videos(client, message):
                 abs_path = os.path.abspath(path).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
-        # أمر FFmpeg للدمج بمسار FFMPEG_BIN المضمون
         command = [
             FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
@@ -112,19 +144,26 @@ async def merge_videos(client, message):
             await msg.edit_text("❌ حدث خطأ أثناء الدمج. تأكد من توافق صيغ الملفات.")
             return
 
-        await msg.edit_text("📤 جاري رفع المقطع المدموج النهائي...")
+        await msg.edit_text("📤 جاري استخراج الغلاف وإرسال المقطع...")
+
+        # استخراج الغلاف والأبعاد الدقيقة للفيديو المدموج
+        duration, width, height = get_video_metadata_and_thumb(output_video_path, thumb_path)
 
         await client.send_video(
             chat_id=user_id,
             video=output_video_path,
-            caption=f"✅ **تم دمج {len(video_list)} عنصر بنجاح!**"
+            caption=f"✅ **تم دمج {len(video_list)} عنصر بنجاح!**",
+            duration=duration,
+            width=width,
+            height=height,
+            thumb=thumb_path if os.path.exists(thumb_path) else None
         )
 
     except Exception as e:
         await msg.edit_text(f"❌ حدث خطأ غير متوقع: {e}")
 
     finally:
-        # 🧹 تنظيف السيرفر
+        # 🧹 تنظيف الملفات المؤقتة
         for path in video_list:
             if os.path.exists(path):
                 os.remove(path)
@@ -134,6 +173,9 @@ async def merge_videos(client, message):
 
         if os.path.exists(output_video_path):
             os.remove(output_video_path)
+
+        if os.path.exists(thumb_path):
+            os.remove(thumb_path)
 
         USER_VIDEOS[user_id] = []
         await msg.delete()
