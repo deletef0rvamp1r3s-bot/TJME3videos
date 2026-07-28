@@ -33,7 +33,7 @@ def has_audio(file_path):
     return "Audio:" in res.stderr
 
 def get_video_metadata_and_thumb(video_path, thumb_path):
-    """استخراج الصورة المصغرة وأبعاد الفيديو ومدته"""
+    """استخراج الصورة المصغرة وأبعاد الفيديو ومدته بدقة"""
     cmd_thumb = [
         FFMPEG_BIN, "-ss", "00:00:00.500", "-i", video_path,
         "-vframes", "1", thumb_path, "-y"
@@ -61,7 +61,7 @@ def get_video_metadata_and_thumb(video_path, thumb_path):
     return duration, width, height
 
 
-# 1️⃣ استلام الملفات (فيديو، صورة، أو صوت) وتوحيدها على 60 فريم وبدون سترتش
+# 1️⃣ استلام الملفات وتوحيد الخصائص والعدّ الزمني
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def collect_media(client, message):
     user_id = message.from_user.id
@@ -71,53 +71,56 @@ async def collect_media(client, message):
         if not (mime.startswith("video/") or mime.startswith("audio/")):
             return
 
-    msg = await message.reply_text("⏳ جاري المعالجة وتوحيد الخصائص على 60 فريم...")
+    msg = await message.reply_text("⏳ جاري المعالجة الكاملة وتجهيز العنصر للدمج...")
 
     try:
         raw_file_path = await message.download()
         processed_video_path = f"processed_{message.id}_{user_id}.mp4"
 
-        # الفلتر البرمجي لعدم السواتش (الحفاظ على الأبعاد مع هوامش سوداء عند الحاجة + 60 فريم)
-        vf_scale_no_stretch = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60"
+        vf_scale_no_stretch = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1"
 
         if message.photo:
-            # صورة: تحويلها لفيديو 3 ثوانٍ بـ 60 فريم وصوت صامت
+            # صورة
             cmd = [
                 FFMPEG_BIN, "-loop", "1", "-i", raw_file_path,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-t", "3", "-r", "60", "-g", "60", "-pix_fmt", "yuv420p",
                 "-vf", vf_scale_no_stretch,
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
+                "-avoid_negative_ts", "make_zero",
                 processed_video_path, "-y"
             ]
         elif message.audio or message.voice:
-            # صوت: تحويله لفيديو شاشة سوداء 60 فريم بنفس مدة الصوت
+            # صوت
             cmd = [
                 FFMPEG_BIN, "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                 "-i", raw_file_path,
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-vf", "setsar=1,fps=60",
+                "-c:v", "libx264", "-r", "60", "-g", "60", "-pix_fmt", "yuv420p",
+                "-vf", "setsar=1",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
+                "-avoid_negative_ts", "make_zero",
                 processed_video_path, "-y"
             ]
         else:
-            # فيديو: توحيد الأبعاد ومنع السترش + 60 فريم + إضافة صوت صامت إذا كان الفيديو الأصل بدون صوت
+            # فيديو (مع توحيد البصمة الزمنية لمنع التوقف)
             if has_audio(raw_file_path):
                 cmd = [
                     FFMPEG_BIN, "-i", raw_file_path,
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-r", "60", "-g", "60", "-pix_fmt", "yuv420p",
                     "-vf", vf_scale_no_stretch,
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-avoid_negative_ts", "make_zero",
                     processed_video_path, "-y"
                 ]
             else:
                 cmd = [
                     FFMPEG_BIN, "-i", raw_file_path,
                     "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-r", "60", "-g", "60", "-pix_fmt", "yuv420p",
                     "-vf", vf_scale_no_stretch,
                     "-c:a", "aac", "-ar", "44100", "-ac", "2", "-map", "0:v:0", "-map", "1:a:0",
                     "-shortest",
+                    "-avoid_negative_ts", "make_zero",
                     processed_video_path, "-y"
                 ]
 
@@ -131,7 +134,7 @@ async def collect_media(client, message):
         count = len(USER_VIDEOS[user_id])
         await msg.edit_text(
             f"✅ **تمت إضافة العنصر رقم ({count}) بنجاح!**\n"
-            f"🎬 **السرعة:** 60 FPS | **الأبعاد:** بدون سترتش\n\n"
+            f"🎬 **60 FPS** | **بدون سترتش** | **تزامن كامل للمدة**\n\n"
             f"• أرسل المزيد من المقاطع أو الصور.\n"
             f"• أرسل كلمة **دمج** أو أمر `/merge` لجمعها.\n"
             f"• أرسل `/clear` للتفريغ."
@@ -154,7 +157,7 @@ async def merge_videos(client, message):
         await message.reply_text("⚠️ يجب إرسال عنصرين على الأقل لدمجهما!")
         return
 
-    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عنصر بـ 60 فريم...")
+    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عنصر بالحجم والمدة الكاملة...")
 
     list_file_path = f"list_{user_id}.txt"
     output_video_path = f"merged_{user_id}.mp4"
@@ -166,11 +169,13 @@ async def merge_videos(client, message):
                 abs_path = os.path.abspath(path).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
-        # الدمج المباشر السريع لأن الخصائص موحدة 100%
+        # إضافة +genpts لإعادة بناء التوقيت الزمني بالكامل ومنع القص
         command = [
             FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
+            "-fflags", "+genpts",
             "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
             output_video_path, "-y"
         ]
 
@@ -180,7 +185,7 @@ async def merge_videos(client, message):
             await msg.edit_text("❌ حدث خطأ أثناء عملية الدمج.")
             return
 
-        await msg.edit_text("📤 جاري رفع المقطع النهائي...")
+        await msg.edit_text("📤 جاري رفع المقطع النهائي بالمدة الكاملة...")
 
         duration, width, height = get_video_metadata_and_thumb(output_video_path, thumb_path)
 
@@ -230,5 +235,5 @@ async def clear_videos(client, message):
 
 
 if __name__ == "__main__":
-    print("🤖 Bot is running with 60 FPS...")
+    print("🤖 Bot is running...")
     app.run()
