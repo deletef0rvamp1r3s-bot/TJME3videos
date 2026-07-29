@@ -33,7 +33,7 @@ def has_audio(file_path):
     return "Audio:" in res.stderr
 
 def get_video_duration(video_path):
-    """استخراج مدة الفيديو بالثواني بدقة مرنة تمنع القراءة الصفريّة"""
+    """استخراج مدة الفيديو بالثواني"""
     cmd_info = [FFMPEG_BIN, "-i", video_path]
     res = subprocess.run(cmd_info, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
@@ -67,7 +67,7 @@ def get_video_metadata_and_thumb(video_path, thumb_path):
     return duration, width, height
 
 
-# 1️⃣ استلام الملفات وإجبار إضافتها مهما كانت صيغتها
+# 1️⃣ استلام الملفات وفلترتها بصرامة لمنع توقف الدمج
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def collect_media(client, message):
     user_id = message.from_user.id
@@ -77,64 +77,59 @@ async def collect_media(client, message):
         if not (mime.startswith("video/") or mime.startswith("audio/")):
             return
 
-    msg = await message.reply_text("⏳ جاري تحميل وإصلاح وتجهيز العنصر...")
+    msg = await message.reply_text("⏳ جاري تنظيف وتجهيز العنصر...")
 
     try:
         raw_file_path = await message.download()
         processed_video_path = f"processed_{message.id}_{user_id}.mp4"
 
+        # 🔴 الفلاتر الصارمة: توحيد الأبعاد، إجبار التايم بيس، وحذف أي مسارات خفية (-sn -dn)
         vf_scale_no_stretch = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        base_encode_flags = [
+            "-c:v", "libx264", "-preset", "fast", "-profile:v", "main",
+            "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+            "-vf", vf_scale_no_stretch,
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-sn", "-dn",  # 🔥 مسح أي ترجمات أو بيانات مخفية تسبب انهيار الدمج
+            "-avoid_negative_ts", "make_zero"
+        ]
+
         media_type = "فيديو"
-        
-        telegram_duration = 0
-        if message.video and message.video.duration:
-            telegram_duration = message.video.duration
-        elif message.audio and message.audio.duration:
-            telegram_duration = message.audio.duration
-        elif message.voice and message.voice.duration:
-            telegram_duration = message.voice.duration
+        telegram_duration = getattr(message.video or message.audio or message.voice, "duration", 0)
 
         if message.photo:
             media_type = "صورة"
             telegram_duration = 3
             cmd = [
-                FFMPEG_BIN, "-loop", "1", "-i", raw_file_path,
+                FFMPEG_BIN, "-loop", "1", "-t", "3", "-i", raw_file_path,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "libx264", "-t", "3", "-r", "60", "-pix_fmt", "yuv420p",
-                "-vf", vf_scale_no_stretch,
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
-                processed_video_path, "-y"
-            ]
+                "-map", "0:v:0", "-map", "1:a:0"
+            ] + base_encode_flags + [processed_video_path, "-y"]
+            
         elif message.audio or message.voice:
             media_type = "صوت"
             cmd = [
                 FFMPEG_BIN, "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                 "-i", raw_file_path,
-                "-c:v", "libx264", "-r", "60", "-pix_fmt", "yuv420p",
-                "-vf", "setsar=1",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest",
-                processed_video_path, "-y"
-            ]
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest"
+            ] + base_encode_flags + [processed_video_path, "-y"]
+            
         else:
-            # تجاهل الأخطاء البرمجية للمقاطع التالفة وتمريرها بالكامل (-err_detect ignore_err)
             if has_audio(raw_file_path):
+                # فيديو بصوت: نجبره يأخذ أول فيديو وأول صوت فقط
                 cmd = [
                     FFMPEG_BIN, "-err_detect", "ignore_err", "-i", raw_file_path,
-                    "-c:v", "libx264", "-r", "60", "-pix_fmt", "yuv420p",
-                    "-vf", vf_scale_no_stretch,
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    processed_video_path, "-y"
-                ]
+                    "-map", "0:v:0", "-map", "0:a:0?"
+                ] + base_encode_flags + [processed_video_path, "-y"]
             else:
+                # فيديو بدون صوت: نضيف له صوت صامت
                 cmd = [
                     FFMPEG_BIN, "-err_detect", "ignore_err", "-i", raw_file_path,
                     "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-c:v", "libx264", "-r", "60", "-pix_fmt", "yuv420p",
-                    "-vf", vf_scale_no_stretch,
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-map", "0:v:0", "-map", "1:a:0",
-                    "-shortest",
-                    processed_video_path, "-y"
-                ]
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-shortest"
+                ] + base_encode_flags + [processed_video_path, "-y"]
 
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -158,7 +153,7 @@ async def collect_media(client, message):
             f"✅ **تمت إضافة العنصر رقم ({count}) بنجاح!**\n"
             f"📌 **النوع:** {media_type} | **المدة:** {dur} ثانية\n"
             f"⏱️ **إجمالي المدة الآن:** {total_sec // 60} دقيقة و {total_sec % 60} ثانية\n\n"
-            f"• أرسل **show** أو `/show` لرؤية القائمة التفصيلية.\n"
+            f"• أرسل **show** أو `/show` لرؤية القائمة.\n"
             f"• أرسل **دمج** أو `/merge` للجمع النهائي.\n"
             f"• أرسل `/clear` للتفريغ."
         )
@@ -188,7 +183,7 @@ async def show_list(client, message):
     await message.reply_text(text)
 
 
-# 3️⃣ عملية الدمج النهائية
+# 3️⃣ عملية الدمج النهائية المحمية
 @app.on_message(filters.private & (filters.command(["merge", "دمج"]) | filters.regex(r"^دمج$")))
 async def merge_videos(client, message):
     user_id = message.from_user.id
@@ -203,7 +198,7 @@ async def merge_videos(client, message):
         return
 
     total_sec = sum(item["duration"] for item in video_list)
-    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عناصر (المدة الكلية: {total_sec // 60} دقيقة و {total_sec % 60} ثانية)...")
+    msg = await message.reply_text(f"⏳ جاري دمج {len(video_list)} عناصر (المدة المتوقعة: {total_sec // 60} دقيقة و {total_sec % 60} ثانية)... قد يستغرق بعض الوقت.")
 
     list_file_path = f"list_{user_id}.txt"
     output_video_path = f"merged_{user_id}.mp4"
@@ -215,12 +210,12 @@ async def merge_videos(client, message):
                 abs_path = os.path.abspath(item["path"]).replace("\\", "/")
                 f.write(f"file '{abs_path}'\n")
 
+        # الدمج النهائي سيمر بسهولة لأننا وحدنا وفلترنا كل شيء مسبقاً
         command = [
             FFMPEG_BIN, "-f", "concat", "-safe", "0",
             "-i", list_file_path,
             "-c:v", "libx264", "-preset", "fast", "-r", "60", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "44100", "-ac", "2",
-            "-avoid_negative_ts", "make_zero",
             output_video_path, "-y"
         ]
 
@@ -230,7 +225,7 @@ async def merge_videos(client, message):
             await msg.edit_text("❌ حدث خطأ أثناء عملية الدمج.")
             return
 
-        await msg.edit_text("📤 جاري رفع المقطع النهائي...")
+        await msg.edit_text("📤 جاري رفع المقطع النهائي، الرجاء الانتظار...")
 
         duration, width, height = get_video_metadata_and_thumb(output_video_path, thumb_path)
         if duration == 0:
@@ -248,7 +243,8 @@ async def merge_videos(client, message):
             duration=duration,
             width=width,
             height=height,
-            thumb=thumb_path if os.path.exists(thumb_path) else None
+            thumb=thumb_path if os.path.exists(thumb_path) else None,
+            supports_streaming=True
         )
 
     except Exception as e:
@@ -287,5 +283,5 @@ async def clear_videos(client, message):
 
 
 if __name__ == "__main__":
-    print("🤖 Bot is running with Force Accept Mode...")
+    print("🤖 Bot is running with Strict Stream Formatting...")
     app.run()
