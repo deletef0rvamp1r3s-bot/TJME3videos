@@ -18,6 +18,7 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 USER_FILES = defaultdict(list)
 PROCESSING_USERS = set()
 
+# 2. Background Functions
 async def get_duration_async(file_path):
     cmd = [FFMPEG, "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
@@ -38,6 +39,13 @@ async def has_audio_async(file_path):
     )
     _, stderr = await proc.communicate()
     return b"Audio:" in stderr
+
+async def run_cmd_async(cmd):
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
+    return proc.returncode
 
 async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**"):
     proc = await asyncio.create_subprocess_exec(
@@ -73,6 +81,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
+# 3. Media Processing (Strict SAR/DAR for no stretching)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -80,15 +89,15 @@ async def process_media(client, message):
     
     try:
         dl_path = await message.download()
-        # Change to .mp4 for better timestamp handling during concatenation
         out_path = f"vid_{message.id}_{user}.mp4"
-        vf = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60"
+        
+        # Strict filter to prevent ANY stretching by enforcing Display Aspect Ratio (9:16)
+        vf = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1:1,setdar=9:16"
         
         duration = await get_duration_async(dl_path)
         if duration == 0:
             duration = 3.0
             
-        # Standardizing all outputs to exact same timebase (90000) for seamless merging
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
@@ -99,7 +108,7 @@ async def process_media(client, message):
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
-                "-i", dl_path, "-vf", "setsar=1,fps=60",
+                "-i", dl_path, "-vf", "setsar=1:1,setdar=9:16",
                 "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
@@ -136,6 +145,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
+# 4. Merge and Force Thumbnail & Dimensions
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -144,17 +154,16 @@ async def merge_media(client, message):
         return await message.reply_text("⏳ **Merge is already in progress, please wait...**")
         
     files = USER_FILES.get(user, [])
-    
-    # 🚨 SECURITY CHECK: Ensure files weren't deleted by Railway sleep/cleanup
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
-        USER_FILES[user] = [] # Clear the broken list
+        USER_FILES[user] = [] 
         return await message.reply_text("❌ **Server deleted your files due to inactivity. Please re-upload and merge without waiting too long!**")
         
     PROCESSING_USERS.add(user)
     msg = await message.reply_text("⏳ **Calculating duration & starting merge...**")
     list_txt = f"list_{user}.txt"
     out_merge = f"final_{user}.mp4"
+    thumb_path = f"thumb_{user}.jpg"
     
     try:
         total_dur = 0.0
@@ -163,7 +172,6 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # Fast copy concat without re-encoding to prevent Railway Out-Of-Memory crash
         cmd = [
             FFMPEG, "-y",
             "-progress", "pipe:1",
@@ -177,19 +185,36 @@ async def merge_media(client, message):
         returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Full Clips Instantly...**")
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
-            await msg.edit_text("📤 **Merge 100% Complete! Uploading full video to Telegram...**")
+            await msg.edit_text("📤 **Merge 100% Complete! Generating Thumbnail...**")
+            
+            # Extract thumbnail to prevent the black box in Telegram
+            thumb_cmd = [FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1", thumb_path]
+            await run_cmd_async(thumb_cmd)
+            
+            await msg.edit_text("📤 **Uploading full video to Telegram...**")
             
             try:
-                await client.send_video(chat_id=user, video=out_merge, caption="✅ **Here is your full merged video! (60 FPS)**")
+                # Force Dimensions & Attach Thumbnail to prevent stretch in Telegram player
+                kwargs = {
+                    "chat_id": user,
+                    "video": out_merge,
+                    "caption": "✅ **Here is your full merged video! (60 FPS)**",
+                    "width": 720,
+                    "height": 1280
+                }
+                if os.path.exists(thumb_path):
+                    kwargs["thumb"] = thumb_path
+
+                await client.send_video(**kwargs)
                 
                 for path in valid_files:
-                    if os.path.exists(path): 
-                        os.remove(path)
+                    if os.path.exists(path): os.remove(path)
                 USER_FILES[user] = []
                 await msg.delete()
                 return
             
-            except Exception:
+            except Exception as e:
+                print(e)
                 await msg.edit_text("❌ **Upload failed (File might be too large). Your clips are still saved in the list.**")
         else:
             await msg.edit_text("❌ **Final merge failed due to engine error.**")
@@ -200,10 +225,9 @@ async def merge_media(client, message):
         except MessageNotModified: 
             pass
     finally:
-        if os.path.exists(list_txt): 
-            os.remove(list_txt)
-        if os.path.exists(out_merge): 
-            os.remove(out_merge)
+        if os.path.exists(list_txt): os.remove(list_txt)
+        if os.path.exists(out_merge): os.remove(out_merge)
+        if os.path.exists(thumb_path): os.remove(thumb_path)
         PROCESSING_USERS.discard(user)
 
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
