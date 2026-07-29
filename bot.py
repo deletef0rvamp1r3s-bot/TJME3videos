@@ -80,7 +80,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 2. Process media and standardize format safely to prevent squishing
+# 2. Process media: NO STRETCH, Force 9:16 (720x1280) with Black Borders
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -94,10 +94,14 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
+        # فلتر سحري: يمنع التمطيط ويضيف حواف سوداء لأي مقطع عشان يصير 9:16 بالضبط
+        scale_filter = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1"
+            
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
@@ -113,18 +117,20 @@ async def process_media(client, message):
             if has_a:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-aspect", "reset",
-                    "-c:a", "aac", out_path
+                    "-vf", scale_filter,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-video_track_timescale", "90000", out_path
                 ]
             else:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                    "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-shortest", out_path
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Original Scale)...**")
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Preserving Aspect Ratio)...**")
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -141,7 +147,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Safe re-encoded merge to prevent any squish or aspect ratio distortion
+# 3. Merge: Keep full duration and ensure thumbnail works
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -168,7 +174,7 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # Safe concatenation with re-encoding to fix aspect ratio and prevent distortion
+        # دمج آمن مع إضافة faststart عشان تيليجرام يقرأ المدة كاملة بدون ما يقص المقطع
         cmd = [
             FFMPEG, "-y",
             "-progress", "pipe:1",
@@ -177,6 +183,7 @@ async def merge_media(client, message):
             "-i", list_txt,
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac",
+            "-movflags", "+faststart",
             out_merge
         ]
         
@@ -185,16 +192,27 @@ async def merge_media(client, message):
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
             
-            thumb_cmd = [FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1", thumb_path]
+            # تصغير التمبنيل إلى 320x320 كحد أقصى عشان تيليجرام يقبله إجبارياً
+            thumb_cmd = [
+                FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
+                "-vf", "scale=320:320:force_original_aspect_ratio=decrease", 
+                thumb_path
+            ]
             await run_cmd_async(thumb_cmd)
             
             await msg.edit_text("📤 **Uploading video to Telegram...**")
+            
+            # جلب المدة النهائية للمقطع وإرسالها إجبارياً لتيليجرام
+            final_duration = await get_duration_async(out_merge)
             
             try:
                 kwargs = {
                     "chat_id": user,
                     "video": out_merge,
-                    "caption": "✅ **Here is your merged video!**"
+                    "caption": "✅ **Here is your merged video!**",
+                    "width": 720,
+                    "height": 1280,
+                    "duration": int(final_duration)
                 }
                 if os.path.exists(thumb_path):
                     kwargs["thumb"] = thumb_path
@@ -207,8 +225,8 @@ async def merge_media(client, message):
                 await msg.delete()
                 return
             
-            except Exception:
-                await msg.edit_text("❌ **Upload failed (File might be too large). Your clips are still saved in the list.**")
+            except Exception as e:
+                await msg.edit_text(f"❌ **Upload failed (File might be too large). Your clips are still saved.**\nError: {e}")
         else:
             await msg.edit_text("❌ **Final merge failed.**")
             
