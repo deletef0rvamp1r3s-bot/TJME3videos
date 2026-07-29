@@ -80,7 +80,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 2. Process media keeping ORIGINAL dimensions and quality without any stretching or padding
+# 2. Process media and standardize format safely to prevent squishing
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -111,10 +111,9 @@ async def process_media(client, message):
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
-                # Re-encode gently using exact original dimensions (no resize, no padding)
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-aspect", "reset",
                     "-c:a", "aac", out_path
                 ]
             else:
@@ -125,7 +124,7 @@ async def process_media(client, message):
                     "-c:a", "aac", "-shortest", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Original Size)...**")
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Original Scale)...**")
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -142,7 +141,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Direct merge without altering original structure
+# 3. Safe re-encoded merge to prevent any squish or aspect ratio distortion
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -169,17 +168,19 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
+        # Safe concatenation with re-encoding to fix aspect ratio and prevent distortion
         cmd = [
             FFMPEG, "-y",
             "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c", "copy",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Together...**")
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Perfectly...**")
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
