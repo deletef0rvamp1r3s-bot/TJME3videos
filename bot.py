@@ -80,7 +80,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 2. Process media: NO SIDE BORDERS, Full Width 720, Top/Bottom Padding only if needed
+# 2. Process media: Canvas set to 720x1560 to fit tall iPhone videos perfectly, adding top/bottom padding for others
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -94,8 +94,8 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # يثبت العرض على 720 دائماً (بدون حواف جانبية)، وبدون تمطيط
-        scale_filter = "scale=720:-2,crop=720:'min(1280,ih)',pad=720:1280:0:'(1280-ih)/2':color=black,fps=30,setsar=1"
+        # فلتر يثبت العرض على 720 والطول على 1560. مستحيل يحط حواف جانبية، وإذا المقطع أقصر بيحط حواف فوق وتحت بس.
+        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1"
             
         if message.photo:
             cmd = [
@@ -107,7 +107,7 @@ async def process_media(client, message):
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
@@ -130,7 +130,7 @@ async def process_media(client, message):
                     "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Standardizing Aspect Ratio)...**")
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Applying iPhone Aspect Ratio)...**")
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -147,7 +147,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Merge section: Faststart + 320x320 thumbnail + Full duration metadata
+# 3. Merge Output
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -191,7 +191,6 @@ async def merge_media(client, message):
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
             
-            # استخراج تمبنيل متوافق 100% مع شروط تيليجرام
             thumb_cmd = [
                 FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
                 "-vf", "scale=320:320:force_original_aspect_ratio=decrease", 
@@ -209,7 +208,7 @@ async def merge_media(client, message):
                     "video": out_merge,
                     "caption": "✅ **Here is your merged video!**",
                     "width": 720,
-                    "height": 1280,
+                    "height": 1560,  # تحديث الأبعاد هنا لتتوافق مع القالب الجديد
                     "duration": int(final_duration)
                 }
                 if os.path.exists(thumb_path):
