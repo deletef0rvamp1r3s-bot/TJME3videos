@@ -18,7 +18,6 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 USER_FILES = defaultdict(list)
 PROCESSING_USERS = set()
 
-# 2. Background Functions
 async def get_duration_async(file_path):
     cmd = [FFMPEG, "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
@@ -81,7 +80,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 3. Media Processing (Strict SAR/DAR for no stretching)
+# 2. Process media keeping ORIGINAL dimensions and quality without any stretching or padding
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -91,9 +90,6 @@ async def process_media(client, message):
         dl_path = await message.download()
         out_path = f"vid_{message.id}_{user}.mp4"
         
-        # Strict filter to prevent ANY stretching by enforcing Display Aspect Ratio (9:16)
-        vf = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1:1,setdar=9:16"
-        
         duration = await get_duration_async(dl_path)
         if duration == 0:
             duration = 3.0
@@ -102,33 +98,34 @@ async def process_media(client, message):
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
-                "-i", dl_path, "-vf", "setsar=1:1,setdar=9:16",
-                "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                "-i", dl_path,
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
+                # Re-encode gently using exact original dimensions (no resize, no padding)
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
-                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", out_path
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", out_path
                 ]
             else:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing & Preparing (60 FPS)...**")
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Original Size)...**")
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -145,7 +142,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 4. Merge and Force Thumbnail & Dimensions
+# 3. Direct merge without altering original structure
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -182,25 +179,21 @@ async def merge_media(client, message):
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Full Clips Instantly...**")
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Together...**")
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
-            await msg.edit_text("📤 **Merge 100% Complete! Generating Thumbnail...**")
+            await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
             
-            # Extract thumbnail to prevent the black box in Telegram
             thumb_cmd = [FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1", thumb_path]
             await run_cmd_async(thumb_cmd)
             
-            await msg.edit_text("📤 **Uploading full video to Telegram...**")
+            await msg.edit_text("📤 **Uploading video to Telegram...**")
             
             try:
-                # Force Dimensions & Attach Thumbnail to prevent stretch in Telegram player
                 kwargs = {
                     "chat_id": user,
                     "video": out_merge,
-                    "caption": "✅ **Here is your full merged video! (60 FPS)**",
-                    "width": 720,
-                    "height": 1280
+                    "caption": "✅ **Here is your merged video!**"
                 }
                 if os.path.exists(thumb_path):
                     kwargs["thumb"] = thumb_path
@@ -213,11 +206,10 @@ async def merge_media(client, message):
                 await msg.delete()
                 return
             
-            except Exception as e:
-                print(e)
+            except Exception:
                 await msg.edit_text("❌ **Upload failed (File might be too large). Your clips are still saved in the list.**")
         else:
-            await msg.edit_text("❌ **Final merge failed due to engine error.**")
+            await msg.edit_text("❌ **Final merge failed.**")
             
     except Exception:
         try: 
@@ -233,7 +225,6 @@ async def merge_media(client, message):
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
 async def show_media(client, message):
     user = message.from_user.id
-    
     files = USER_FILES.get(user, [])
     valid_files = [f for f in files if os.path.exists(f)]
     count = len(valid_files)
