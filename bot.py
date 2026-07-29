@@ -7,7 +7,7 @@ import imageio_ffmpeg
 from pyrogram import Client, filters
 from pyrogram.errors import MessageNotModified
 
-# 1️⃣ Bot Setup
+# 1. Bot Setup
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -73,7 +73,6 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 2️⃣ تجهيز كل مقطع مفرد (60 FPS + منع التمطيط)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -81,41 +80,43 @@ async def process_media(client, message):
     
     try:
         dl_path = await message.download()
-        out_path = f"vid_{message.id}_{user}.ts"
+        # Change to .mp4 for better timestamp handling during concatenation
+        out_path = f"vid_{message.id}_{user}.mp4"
         vf = "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60"
         
         duration = await get_duration_async(dl_path)
         if duration == 0:
             duration = 3.0
             
+        # Standardizing all outputs to exact same timebase (90000) for seamless merging
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-f", "mpegts", out_path
+                "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                 "-i", dl_path, "-vf", "setsar=1,fps=60",
-                "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-f", "mpegts", out_path
+                "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
-                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-f", "mpegts", out_path
+                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", out_path
                 ]
             else:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-f", "mpegts", out_path
+                    "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing & Preparing (60 FPS)...**")
@@ -135,7 +136,6 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3️⃣ الدمج النهائي الكامل مع إصلاح الـ Timestamps لضمان إرسال الفيديو بالكامل
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -145,8 +145,11 @@ async def merge_media(client, message):
         
     files = USER_FILES.get(user, [])
     
-    if len(files) < 2:
-        return await message.reply_text(f"❌ **You only have ({len(files)}) clips. Send at least 2 clips to merge!**")
+    # 🚨 SECURITY CHECK: Ensure files weren't deleted by Railway sleep/cleanup
+    valid_files = [f for f in files if os.path.exists(f)]
+    if len(valid_files) < 2:
+        USER_FILES[user] = [] # Clear the broken list
+        return await message.reply_text("❌ **Server deleted your files due to inactivity. Please re-upload and merge without waiting too long!**")
         
     PROCESSING_USERS.add(user)
     msg = await message.reply_text("⏳ **Calculating duration & starting merge...**")
@@ -156,24 +159,22 @@ async def merge_media(client, message):
     try:
         total_dur = 0.0
         with open(list_txt, "w") as f:
-            for path in files:
+            for path in valid_files:
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # استخدام +genpts لإعادة بناء التوقيتات وتفادي قطع المقطع
+        # Fast copy concat without re-encoding to prevent Railway Out-Of-Memory crash
         cmd = [
             FFMPEG, "-y",
             "-progress", "pipe:1",
-            "-fflags", "+genpts",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c:v", "libx264", "-preset", "ultrafast", "-r", "60", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
+            "-c", "copy",
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Full Clips (60 FPS)...**")
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Full Clips Instantly...**")
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge 100% Complete! Uploading full video to Telegram...**")
@@ -181,18 +182,17 @@ async def merge_media(client, message):
             try:
                 await client.send_video(chat_id=user, video=out_merge, caption="✅ **Here is your full merged video! (60 FPS)**")
                 
-                # مسح المقاطع القديمة فقط بعد إتمام الرفع بنجاح
-                for path in files:
+                for path in valid_files:
                     if os.path.exists(path): 
                         os.remove(path)
                 USER_FILES[user] = []
                 await msg.delete()
                 return
             
-            except Exception as upload_err:
+            except Exception:
                 await msg.edit_text("❌ **Upload failed (File might be too large). Your clips are still saved in the list.**")
         else:
-            await msg.edit_text("❌ **Final merge failed.**")
+            await msg.edit_text("❌ **Final merge failed due to engine error.**")
             
     except Exception:
         try: 
@@ -206,17 +206,20 @@ async def merge_media(client, message):
             os.remove(out_merge)
         PROCESSING_USERS.discard(user)
 
-# 4️⃣ أمر عرض القائمة
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
 async def show_media(client, message):
     user = message.from_user.id
-    count = len(USER_FILES.get(user, []))
+    
+    files = USER_FILES.get(user, [])
+    valid_files = [f for f in files if os.path.exists(f)]
+    count = len(valid_files)
+    
     if count == 0:
+        USER_FILES[user] = []
         await message.reply_text("📭 **Your list is currently empty.**")
     else:
         await message.reply_text(f"📋 **Current List Status:**\n• **Clips Ready:** **({count})**\n\n• Send /merge to merge\n• Send /clear to clear")
 
-# 5️⃣ مسح القائمة
 @app.on_message(filters.private & filters.command(["clear", "مسح"]))
 async def clear_media(client, message):
     user = message.from_user.id
