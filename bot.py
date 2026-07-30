@@ -100,48 +100,46 @@ async def process_media(client, message):
         async with USER_LOCKS[user]:
             W, H = 720, 1280
 
-        # مقاس آيفون ثابت 9:16 مع حواف سوداء تامة بدون تمطيط
-        scale_filter = f"scale='trunc(min({W},iw*{H}/ih)/2)*2':'trunc(min({H},ih*{W}/iw)/2)*2',pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # الفلتر الجديد: يضبط المقاس بدون تمطيط ويضع حواف سوداء ذكية
+        scale_filter = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
-                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-max_muxing_queue_size", "512", "-shortest", "-f", "mpegts", out_path
+                "-f", "mpegts", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1",
                 "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
                 "-i", dl_path,
                 "-vf", "setsar=1",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-max_muxing_queue_size", "512", "-shortest", "-f", "mpegts", out_path
+                "-shortest", "-f", "mpegts", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
-                    "-t", str(duration + 0.5),
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-i", dl_path,
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "512", "-f", "mpegts", out_path
+                    "-f", "mpegts", out_path
                 ]
             else:
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
-                    "-t", str(duration + 0.5),
-                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-i", dl_path,
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "512", "-f", "mpegts", out_path
+                    "-shortest", "-f", "mpegts", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
@@ -163,7 +161,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Merge Output (آمن ومستقر 100% بدون انهيار الذاكرة)
+# 3. Merge Output (تم حل مشكلة الانهيار - آمن وسريع 100%)
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -178,7 +176,7 @@ async def merge_media(client, message):
         return await message.reply_text("❌ **Need at least 2 files to merge!**")
         
     PROCESSING_USERS.add(user)
-    msg = await message.reply_text("⏳ **Calculating duration & starting merge...**")
+    msg = await message.reply_text("⏳ **Starting lightning fast merge...**")
     list_txt = f"list_{user}.txt"
     out_merge = f"final_{user}.mp4"
     thumb_path = f"thumb_{user}.jpg"
@@ -191,20 +189,19 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # 🔥 تم تعديل الدمج ليعيد الترميز بأمان تام لمنع خطأ Segmentation Fault (Exit Code -11)
+        # 🚀 التعديل الأهم: استخدام c copy لنسخ المسارات بدون إعادة ترميز لمنع الخطأ -11
         cmd = [
-            FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats",
-            "-progress", "pipe:1",
+            FFMPEG, "-y", "-nostdin",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-c", "copy",
             "-movflags", "+faststart",
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips safely...**", log_file)
+        # لأن العملية أصبحت نسخ فقط، ستنتهي في ثوانٍ معدودة ولن تضغط على الرام
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips instantly...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
