@@ -83,7 +83,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         await proc.wait()
         return proc.returncode
 
-# 2. Process media (توحيد وتصفية كل الملفات لمنع الانهيار)
+# 2. Process media (فلترة حواف ذكية بدون تمطيط)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -101,8 +101,8 @@ async def process_media(client, message):
         async with USER_LOCKS[user]:
             W, H = 720, 1280
 
-        # مقاس آيفون ثابت مع حواف سوداء وتوسيط بدون أي تمطيط
-        scale_filter = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # الفلتر الأذكى: توسيط تلقائي (-1:-1) وإجبار نسبة العرض 9:16
+        scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:-1:-1:color=black,setdar=9/16,fps=30"
             
         if message.photo:
             cmd = [
@@ -145,7 +145,7 @@ async def process_media(client, message):
                     "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
                     "-i", dl_path,
                     "-map", "0:v:0", "-map", "1:a:0",
-                    "-vf", "setsar=1",
+                    "-vf", "setdar=9/16",
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
                     "-shortest", out_path
@@ -174,7 +174,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Merge Output (دمج صاروخي ومستحيل ينهار)
+# 3. Merge Output (إرسال مع إجبار تليجرام على عرض الآيفون 9:16)
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -202,7 +202,6 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # استخدام النسخ المباشر للمسارات (c copy) لأنه آمن الآن بعد أن وحدنا كل الفيديوهات في الخطوة السابقة
         cmd = [
             FFMPEG, "-y", "-nostdin",
             "-progress", "pipe:1",
@@ -219,9 +218,10 @@ async def merge_media(client, message):
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
+            # صنع صورة مصغرة أبعادها 9:16 (طولية) عشان تليجرام ما يستعبط
             thumb_cmd = [
                 FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
-                "-vf", "scale=320:320:force_original_aspect_ratio=decrease", 
+                "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:-1:-1:color=black", 
                 thumb_path
             ]
             await run_cmd_async(thumb_cmd)
@@ -229,11 +229,14 @@ async def merge_media(client, message):
             final_duration = await get_duration_async(out_merge)
             
             try:
+                # أضفنا width و height عشان نجبر تليجرام يعرض الفيديو بشكل طولي
                 kwargs = {
                     "chat_id": user,
                     "video": out_merge,
                     "caption": "✅ **Here is your merged video!**",
-                    "duration": int(final_duration)
+                    "duration": int(final_duration),
+                    "width": 720,
+                    "height": 1280
                 }
                 if os.path.exists(thumb_path):
                     kwargs["thumb"] = thumb_path
