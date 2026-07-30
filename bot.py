@@ -46,9 +46,8 @@ async def run_cmd_async(cmd):
     await proc.communicate()
     return proc.returncode
 
-# تحديث جوهري: توجيه أخطاء FFmpeg إلى ملف لمعرفة سبب المشكلة إن حدثت
 async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**", log_file="ffmpeg_error.log"):
-    with open(log_file, "w") as err_file:
+    with open(log_file, "w", encoding="utf-8") as err_file:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file
         )
@@ -97,10 +96,9 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # الحل القاطع لأبعاد الفيديو: التحويل إلى yuv444p لتخطي قيود الأرقام الفردية ثم إعادته لـ yuv420p في النهاية
-        scale_filter = "format=yuv444p,scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:-1:-1:color=black,fps=30,setsar=1,format=yuv420p"
+        # الحل الأمثل والأكثر أماناً: التصغير -> الاقتطاع الزوجي (للتخلص من أي بكسل فردي) -> التوسيط
+        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,crop='trunc(iw/2)*2':'trunc(ih/2)*2',pad=720:1560:-1:-1:color=black,fps=30,setsar=1"
             
-        # إضافة -map صريح لمنع تشتت FFmpeg بين مسارات تيليجرام العشوائية
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
@@ -108,41 +106,38 @@ async def process_media(client, message):
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-map", "0:v:0", "-map", "1:a:0",
                 "-shortest", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
+                FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", 
+                "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-map", "0:v:0", "-map", "1:a:0",
                 "-shortest", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
                 cmd = [
-                    FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
+                    FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-map", "0:v:0", "-map", "0:a:0?",
                     "-video_track_timescale", "90000", out_path
                 ]
             else:
                 cmd = [
-                    FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
+                    FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-map", "0:v:0", "-map", "1:a:0",
                     "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Applying Super Fix)...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Robust Mode)...**", log_file)
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -152,11 +147,13 @@ async def process_media(client, message):
             await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
             if os.path.exists(log_file): os.remove(log_file)
         else:
-            # طباعة الخطأ الفعلي للمستخدم في حال الفشل
             err_msg = "❌ **Error processing this file.**"
             if os.path.exists(log_file):
-                with open(log_file, "r") as f:
-                    err_txt = f.read()[-600:]
+                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                    # تحويل الأسطر المكتوبة فوق بعضها (\r) إلى أسطر فعلية (\n) لنرى الخطأ بوضوح
+                    log_content = f.read().replace('\r', '\n')
+                    lines = [line.strip() for line in log_content.split('\n') if line.strip()]
+                    err_txt = '\n'.join(lines[-15:])
                 err_msg += f"\n\n**FFmpeg Log:**\n`{err_txt}`"
                 os.remove(log_file)
             await msg.edit_text(err_msg)
@@ -190,7 +187,7 @@ async def merge_media(client, message):
     
     try:
         total_dur = 0.0
-        with open(list_txt, "w") as f:
+        with open(list_txt, "w", encoding="utf-8") as f:
             for path in valid_files:
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
@@ -247,9 +244,12 @@ async def merge_media(client, message):
         else:
             err_msg = "❌ **Final merge failed.**"
             if os.path.exists(log_file):
-                with open(log_file, "r") as f:
-                    err_txt = f.read()[-600:]
+                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                    log_content = f.read().replace('\r', '\n')
+                    lines = [line.strip() for line in log_content.split('\n') if line.strip()]
+                    err_txt = '\n'.join(lines[-15:])
                 err_msg += f"\n\n**Log:**\n`{err_txt}`"
+                os.remove(log_file)
             await msg.edit_text(err_msg)
             
     except Exception as e:
