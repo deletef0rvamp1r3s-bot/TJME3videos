@@ -105,7 +105,7 @@ async def process_media(client, message):
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-max_muxing_queue_size", "1024", "-shortest", out_path
+                "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
@@ -114,7 +114,7 @@ async def process_media(client, message):
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-max_muxing_queue_size", "1024", "-shortest", out_path
+                "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
@@ -201,9 +201,7 @@ async def merge_media(client, message):
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-max_muxing_queue_size", "1024",
+            "-c", "copy",  # التعديل السحري لنسخ البيانات بدون استهلاك للرامات
             "-movflags", "+faststart",
             out_merge
         ]
