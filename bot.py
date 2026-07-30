@@ -16,6 +16,7 @@ app = Client("railway_optimal_merger", api_id=API_ID, api_hash=API_HASH, bot_tok
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 USER_FILES = defaultdict(list)
+USER_RES = {}  # حفظ أبعاد أول مقطع لكل مستخدم
 PROCESSING_USERS = set()
 
 async def get_duration_async(file_path):
@@ -30,6 +31,24 @@ async def get_duration_async(file_path):
         hours, minutes, seconds = match.groups()
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
+
+async def get_resolution_async(file_path):
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    stderr_str = stderr.decode('utf-8', errors='ignore')
+    
+    # استخراج دقة الفيديو
+    match = re.search(r"Stream #\d+:\d+.*?: Video:.*?,\s*(\d+)x(\d+)", stderr_str)
+    if not match:
+        match = re.search(r"Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str)
+    if match:
+        w, h = int(match.group(1)), int(match.group(2))
+        # التأكد أن الأبعاد أرقام زوجية (مطلوب في ترميز h264)
+        return w - (w % 2), h - (h % 2)
+    return None, None
 
 async def has_audio_async(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path]
@@ -96,8 +115,17 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # تم تعديل الفلتر لتوحيد المقاسات تماماً (720x1280) ومنع تعليق الصورة
-        scale_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
+        # تحديد الأبعاد بناءً على "أول" مقطع يتم إرساله لتجنب التمطيط وتوحيد الأبعاد
+        if len(USER_FILES[user]) == 0:
+            w, h = await get_resolution_async(dl_path)
+            if not w or not h:
+                w, h = 720, 1280
+            USER_RES[user] = (w, h)
+        else:
+            w, h = USER_RES.get(user, (720, 1280))
+
+        # هذا الفلتر السحري: يحافظ على أبعاد المقطع الأصلية، وإذا كان أصغر أو مختلف يضيف حواف سوداء (بدون سترتش)
+        scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30"
             
         if message.photo:
             cmd = [
@@ -111,7 +139,7 @@ async def process_media(client, message):
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
-                "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
@@ -176,6 +204,7 @@ async def merge_media(client, message):
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
         USER_FILES[user] = [] 
+        USER_RES.pop(user, None)
         return await message.reply_text("❌ **Server deleted your files due to inactivity. Please re-upload and merge without waiting too long!**")
         
     PROCESSING_USERS.add(user)
@@ -231,7 +260,10 @@ async def merge_media(client, message):
                 
                 for path in valid_files:
                     if os.path.exists(path): os.remove(path)
+                
+                # تصفير القائمة والأبعاد للمشاريع القادمة
                 USER_FILES[user] = []
+                USER_RES.pop(user, None)
                 await msg.delete()
                 
             except Exception as e:
@@ -267,6 +299,7 @@ async def show_media(client, message):
     
     if count == 0:
         USER_FILES[user] = []
+        USER_RES.pop(user, None)
         await message.reply_text("📭 **Your list is currently empty.**")
     else:
         await message.reply_text(f"📋 **Current List Status:**\n• **Clips Ready:** **({count})**\n\n• Send /merge to merge\n• Send /clear to clear")
@@ -278,6 +311,7 @@ async def clear_media(client, message):
         if os.path.exists(path): 
             os.remove(path)
     USER_FILES[user] = []
+    USER_RES.pop(user, None)
     await message.reply_text("🗑️ **List cleared and memory freed successfully.**")
 
 if __name__ == "__main__":
