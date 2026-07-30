@@ -96,25 +96,26 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,crop='trunc(iw/2)*2':'trunc(ih/2)*2',pad=720:1560:-1:-1:color=black,fps=30,setsar=1"
+        # تم إزالة أوامر الحواف السوداء (pad) وتغيير المقاسات. المقطع يبقى كما هو بالضبط!
+        scale_filter = "scale='trunc(iw/2)*2':'trunc(ih/2)*2',fps=30"
             
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
+                "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
-                "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
+                "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30",
                 "-i", dl_path,
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
+                "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
@@ -123,9 +124,9 @@ async def process_media(client, message):
                     FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-t", str(duration + 0.5),
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "1024", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "512", "-video_track_timescale", "90000", out_path
                 ]
             else:
                 cmd = [
@@ -133,9 +134,9 @@ async def process_media(client, message):
                     "-t", str(duration + 0.5),
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
@@ -149,10 +150,6 @@ async def process_media(client, message):
             if os.path.exists(log_file): os.remove(log_file)
         else:
             err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
-            
-            if returncode == -9 or returncode == -137:
-                err_msg += "\n\n⚠️ **CRASH DIAGNOSIS:** `Exit Code -9` means Railway forcefully killed FFmpeg because your container ran out of RAM (Out of Memory). You either need to upgrade your Railway RAM, or process smaller/shorter videos."
-                
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                     lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
@@ -201,15 +198,15 @@ async def merge_media(client, message):
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c", "copy",  # التعديل السحري لنسخ البيانات بدون استهلاك للرامات
+            "-c", "copy",
             "-movflags", "+faststart",
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Perfectly...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips perfectly...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
-            await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
+            await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
             thumb_cmd = [
                 FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
@@ -218,8 +215,6 @@ async def merge_media(client, message):
             ]
             await run_cmd_async(thumb_cmd)
             
-            await msg.edit_text("📤 **Uploading video to Telegram...**")
-            
             final_duration = await get_duration_async(out_merge)
             
             try:
@@ -227,8 +222,6 @@ async def merge_media(client, message):
                     "chat_id": user,
                     "video": out_merge,
                     "caption": "✅ **Here is your merged video!**",
-                    "width": 720,
-                    "height": 1560,
                     "duration": int(final_duration)
                 }
                 if os.path.exists(thumb_path):
@@ -245,10 +238,6 @@ async def merge_media(client, message):
                 await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
         else:
             err_msg = f"❌ **Final merge failed. (Exit Code: {returncode})**"
-            
-            if returncode == -9 or returncode == -137:
-                err_msg += "\n\n⚠️ **CRASH DIAGNOSIS:** `Exit Code -9` means Out of Memory during merge."
-                
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                     lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
