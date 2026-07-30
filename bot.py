@@ -46,40 +46,41 @@ async def run_cmd_async(cmd):
     await proc.communicate()
     return proc.returncode
 
-async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**"):
-    # تم تغيير stderr إلى DEVNULL لتجنب امتلاء الذاكرة المؤقتة (buffer) وتوقف البوت
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-    )
-    
-    last_update = 0
-    pattern = re.compile(r"out_time_ms=(\d+)")
-    
-    while True:
-        line = await proc.stdout.readline()
-        if not line:
-            break
-        line_str = line.decode("utf-8", errors="ignore").strip()
-        match = pattern.search(line_str)
+# تحديث جوهري: توجيه أخطاء FFmpeg إلى ملف لمعرفة سبب المشكلة إن حدثت
+async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**", log_file="ffmpeg_error.log"):
+    with open(log_file, "w") as err_file:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file
+        )
         
-        if match and total_duration > 0:
-            current_ms = int(match.group(1))
-            current_sec = current_ms / 1000000.0
-            percent = min(100, int((current_sec / total_duration) * 100))
+        last_update = 0
+        pattern = re.compile(r"out_time_ms=(\d+)")
+        
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            line_str = line.decode("utf-8", errors="ignore").strip()
+            match = pattern.search(line_str)
             
-            filled = int(percent / 10)
-            bar = "█" * filled + "░" * (10 - filled)
-            
-            now = time.time()
-            if now - last_update >= 3:
-                last_update = now
-                try:
-                    await msg.edit_text(f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
-                except Exception:
-                    pass
-                    
-    await proc.wait()
-    return proc.returncode
+            if match and total_duration > 0:
+                current_ms = int(match.group(1))
+                current_sec = current_ms / 1000000.0
+                percent = min(100, int((current_sec / total_duration) * 100))
+                
+                filled = int(percent / 10)
+                bar = "█" * filled + "░" * (10 - filled)
+                
+                now = time.time()
+                if now - last_update >= 3:
+                    last_update = now
+                    try:
+                        await msg.edit_text(f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
+                    except Exception:
+                        pass
+                        
+        await proc.wait()
+        return proc.returncode
 
 # 2. Process media
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
@@ -90,28 +91,34 @@ async def process_media(client, message):
     try:
         dl_path = await message.download()
         out_path = f"vid_{message.id}_{user}.mp4"
+        log_file = f"ffmpeg_err_{user}.log"
         
         duration = await get_duration_async(dl_path)
         if duration == 0:
             duration = 3.0
             
-        # تم استبدال الحساب اليدوي بـ -1:-1 لتوسيط الفيديو تلقائياً وتجنب مشكلة الأبعاد الفردية
-        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:-1:-1:color=black,fps=30,setsar=1"
+        # الحل القاطع لأبعاد الفيديو: التحويل إلى yuv444p لتخطي قيود الأرقام الفردية ثم إعادته لـ yuv420p في النهاية
+        scale_filter = "format=yuv444p,scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:-1:-1:color=black,fps=30,setsar=1,format=yuv420p"
             
+        # إضافة -map صريح لمنع تشتت FFmpeg بين مسارات تيليجرام العشوائية
         if message.photo:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", 
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-progress", "pipe:1", "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", out_path
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
@@ -120,7 +127,9 @@ async def process_media(client, message):
                     FFMPEG, "-y", "-progress", "pipe:1", "-err_detect", "ignore_err", "-i", dl_path,
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-video_track_timescale", "90000", out_path
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-video_track_timescale", "90000", out_path
                 ]
             else:
                 cmd = [
@@ -128,10 +137,12 @@ async def process_media(client, message):
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest", "-video_track_timescale", "90000", out_path
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Applying iPhone Aspect Ratio)...**")
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Applying Super Fix)...**", log_file)
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -139,12 +150,20 @@ async def process_media(client, message):
         if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             USER_FILES[user].append(out_path)
             await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
+            if os.path.exists(log_file): os.remove(log_file)
         else:
-            await msg.edit_text("❌ **Error processing this file. Try another.**")
+            # طباعة الخطأ الفعلي للمستخدم في حال الفشل
+            err_msg = "❌ **Error processing this file.**"
+            if os.path.exists(log_file):
+                with open(log_file, "r") as f:
+                    err_txt = f.read()[-600:]
+                err_msg += f"\n\n**FFmpeg Log:**\n`{err_txt}`"
+                os.remove(log_file)
+            await msg.edit_text(err_msg)
             
-    except Exception:
+    except Exception as e:
         try: 
-            await msg.edit_text("❌ **Download Failed.**")
+            await msg.edit_text(f"❌ **Download or processing failed.**\n`{e}`")
         except MessageNotModified: 
             pass
 
@@ -167,6 +186,7 @@ async def merge_media(client, message):
     list_txt = f"list_{user}.txt"
     out_merge = f"final_{user}.mp4"
     thumb_path = f"thumb_{user}.jpg"
+    log_file = f"ffmpeg_merge_err_{user}.log"
     
     try:
         total_dur = 0.0
@@ -187,7 +207,7 @@ async def merge_media(client, message):
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Perfectly...**")
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips Perfectly...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
@@ -221,22 +241,27 @@ async def merge_media(client, message):
                     if os.path.exists(path): os.remove(path)
                 USER_FILES[user] = []
                 await msg.delete()
-                return
-            
+                
             except Exception as e:
-                await msg.edit_text(f"❌ **Upload failed.**\nError: {e}")
+                await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
         else:
-            await msg.edit_text("❌ **Final merge failed.**")
+            err_msg = "❌ **Final merge failed.**"
+            if os.path.exists(log_file):
+                with open(log_file, "r") as f:
+                    err_txt = f.read()[-600:]
+                err_msg += f"\n\n**Log:**\n`{err_txt}`"
+            await msg.edit_text(err_msg)
             
-    except Exception:
+    except Exception as e:
         try: 
-            await msg.edit_text("❌ **An unexpected error occurred during merge.**")
+            await msg.edit_text(f"❌ **An unexpected error occurred during merge:**\n`{e}`")
         except MessageNotModified: 
             pass
     finally:
         if os.path.exists(list_txt): os.remove(list_txt)
         if os.path.exists(out_merge): os.remove(out_merge)
         if os.path.exists(thumb_path): os.remove(thumb_path)
+        if os.path.exists(log_file): os.remove(log_file)
         PROCESSING_USERS.discard(user)
 
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
