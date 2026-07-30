@@ -96,8 +96,8 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # تم إزالة أوامر الحواف السوداء (pad) وتغيير المقاسات. المقطع يبقى كما هو بالضبط!
-        scale_filter = "scale='trunc(iw/2)*2':'trunc(ih/2)*2',fps=30"
+        # تم تعديل الفلتر لتوحيد المقاسات تماماً (720x1280) ومنع تعليق الصورة
+        scale_filter = "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30"
             
         if message.photo:
             cmd = [
@@ -111,7 +111,7 @@ async def process_media(client, message):
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
-                "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30",
+                "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
@@ -136,7 +136,7 @@ async def process_media(client, message):
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "512", "-video_track_timescale", "90000", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
