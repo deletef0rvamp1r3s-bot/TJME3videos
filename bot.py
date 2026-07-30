@@ -96,7 +96,6 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # الحل الأمثل والأكثر أماناً: التصغير -> الاقتطاع الزوجي (للتخلص من أي بكسل فردي) -> التوسيط
         scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,crop='trunc(iw/2)*2':'trunc(ih/2)*2',pad=720:1560:-1:-1:color=black,fps=30,setsar=1"
             
         if message.photo:
@@ -120,8 +119,10 @@ async def process_media(client, message):
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
+                # أضفنا -t لتحديد المدة بدقة وإجبار FFmpeg على الخروج فور انتهاء الفيديو وعدم التعليق في النهاية
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    "-t", str(duration + 0.5),
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
@@ -130,6 +131,7 @@ async def process_media(client, message):
             else:
                 cmd = [
                     FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    "-t", str(duration + 0.5),
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -137,7 +139,7 @@ async def process_media(client, message):
                     "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Robust Mode)...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Final Fix)...**", log_file)
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -150,7 +152,6 @@ async def process_media(client, message):
             err_msg = "❌ **Error processing this file.**"
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    # تحويل الأسطر المكتوبة فوق بعضها (\r) إلى أسطر فعلية (\n) لنرى الخطأ بوضوح
                     log_content = f.read().replace('\r', '\n')
                     lines = [line.strip() for line in log_content.split('\n') if line.strip()]
                     err_txt = '\n'.join(lines[-15:])
