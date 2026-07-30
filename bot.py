@@ -16,7 +16,6 @@ app = Client("railway_optimal_merger", api_id=API_ID, api_hash=API_HASH, bot_tok
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 USER_FILES = defaultdict(list)
-USER_RES = {}  
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
@@ -99,33 +98,11 @@ async def process_media(client, message):
             duration = 3.0
             
         async with USER_LOCKS[user]:
-            if user not in USER_RES:
-                w, h = 720, 1280
-                
-                # أخذ الأبعاد الصحيحة من سيرفرات تلجرام مباشرة لتجنب أخطاء دوران الفيديو
-                if message.video:
-                    w = message.video.width
-                    h = message.video.height
-                elif message.photo:
-                    w = message.photo.width
-                    h = message.photo.height
-                
-                # التأكد أن الأبعاد أرقام زوجية (متطلب أساسي للترميز)
-                w = w - (w % 2)
-                h = h - (h % 2)
-                
-                if w > 0 and h > 0:
-                    USER_RES[user] = (w, h)
-                else:
-                    USER_RES[user] = (720, 1280) 
-            
-            w, h = USER_RES[user]
+            # مقاس الآيفون الثابت للجميع بدون نقاش
+            W, H = 720, 1280
 
-        # الفلتر النهائي: 
-        # 1. scale=iw*sar:ih يمنع أي تمطيط ناتج عن بكسلات مستطيلة
-        # 2. scale=w:h:force_original_aspect_ratio يضبط الحجم على مقاس أول مقطع بالضبط
-        # 3. pad يضيف الحواف السوداء فقط للمقاطع اللي أبعادها مختلفة (مثل فيديو بالعرض)
-        scale_filter = f"scale=iw*sar:ih,scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:-1:-1:color=black,setsar=1,fps=30"
+        # أمر صريح: لا تمطط أي شيء، حط حواف سوداء إذا الحجم مختلف
+        scale_filter = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
@@ -139,7 +116,7 @@ async def process_media(client, message):
         elif message.audio or message.voice:
             cmd = [
                 FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
-                "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r=30",
+                "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
                 "-i", dl_path,
                 "-vf", "setsar=1",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
@@ -205,7 +182,6 @@ async def merge_media(client, message):
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
         USER_FILES[user] = [] 
-        USER_RES.pop(user, None)
         return await message.reply_text("❌ **Server deleted your files due to inactivity. Please re-upload and merge without waiting too long!**")
         
     PROCESSING_USERS.add(user)
@@ -263,7 +239,6 @@ async def merge_media(client, message):
                     if os.path.exists(path): os.remove(path)
                 
                 USER_FILES[user] = []
-                USER_RES.pop(user, None)
                 await msg.delete()
                 
             except Exception as e:
@@ -299,7 +274,6 @@ async def show_media(client, message):
     
     if count == 0:
         USER_FILES[user] = []
-        USER_RES.pop(user, None)
         await message.reply_text("📭 **Your list is currently empty.**")
     else:
         await message.reply_text(f"📋 **Current List Status:**\n• **Clips Ready:** **({count})**\n\n• Send /merge to merge\n• Send /clear to clear")
@@ -311,7 +285,6 @@ async def clear_media(client, message):
         if os.path.exists(path): 
             os.remove(path)
     USER_FILES[user] = []
-    USER_RES.pop(user, None)
     await message.reply_text("🗑️ **List cleared and memory freed successfully.**")
 
 if __name__ == "__main__":
