@@ -17,7 +17,7 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 USER_FILES = defaultdict(list)
 USER_RES = {}  
-USER_LOCKS = defaultdict(asyncio.Lock) # قفل برمجي لمنع تداخل المقاسات عند الإرسال السريع
+USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
 async def get_duration_async(file_path):
@@ -33,32 +33,28 @@ async def get_duration_async(file_path):
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
 
-async def get_resolution_async(file_path):
-    cmd = [FFMPEG, "-nostdin", "-i", file_path]
+# تم استبدال الدالة القديمة بدالة قوية تقرأ الأبعاد الحقيقية بعد المعالجة لتجنب أخطاء الدوران (Rotation)
+async def get_true_resolution(file_path):
+    cmd = [FFMPEG, "-nostdin", "-i", file_path, "-vframes", "1", "-f", "null", "-"]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
     stderr_str = stderr.decode('utf-8', errors='ignore')
     
-    w, h = None, None
-    # استخراج دقة الفيديو
-    match = re.search(r"Stream #\d+:\d+.*?: Video:.*?,\s*(\d+)x(\d+)", stderr_str)
-    if not match:
-        match = re.search(r"Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str)
+    # استخراج الأبعاد النهائية بالضبط كما ستعرض للمشاهد
+    match = re.search(r"Output #0.*?Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str, re.DOTALL | re.IGNORECASE)
     if match:
         w, h = int(match.group(1)), int(match.group(2))
+        return w - (w % 2), h - (h % 2)
+    
+    # طريقة احتياطية في حال الفشل
+    match = re.search(r"Stream #\d+:\d+.*?: Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str)
+    if match:
+        w, h = int(match.group(1)), int(match.group(2))
+        return w - (w % 2), h - (h % 2)
         
-    # فحص دوران الفيديو (لتجنب عكس الطول والعرض)
-    rotation_match = re.search(r"rotation of -?(\d+)\.\d+ degrees", stderr_str)
-    if rotation_match:
-        rot = int(float(rotation_match.group(1)))
-        if rot in [90, 270, -90, -270] and w and h:
-            w, h = h, w  # قلب الأبعاد إذا كان المقطع مصور بالطول ومحفوظ بالعرض
-            
-    if w and h:
-        return w - (w % 2), h - (h % 2) # التأكد أنها أرقام زوجية
-    return None, None
+    return 720, 1280
 
 async def has_audio_async(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path]
@@ -125,17 +121,15 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # استخدام القفل لضمان عدم تداخل الأبعاد إذا أرسل المستخدم عدة مقاطع بوقت واحد
         async with USER_LOCKS[user]:
             if user not in USER_RES:
-                w, h = await get_resolution_async(dl_path)
-                if not w or not h:
-                    w, h = 720, 1280
+                w, h = await get_true_resolution(dl_path)
                 USER_RES[user] = (w, h)
-            w, h = USER_RES[user]
+            else:
+                w, h = USER_RES[user]
 
-        # فلتر يمنع السترتش نهائياً، يضيف حواف للمقاطع الصغيرة فقط، ويجبر تلجرام على أبعاد صحيحة (setsar=1)
-        scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # هذا الفلتر مستحيل يمطط المقطع. المقاطع الصغيرة تبقى صغيرة وتأخذ حواف، والمقطع الأول يبقى مثل ما هو.
+        scale_filter = f"scale=min({w}\\,iw):min({h}\\,ih):force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
@@ -272,7 +266,6 @@ async def merge_media(client, message):
                 for path in valid_files:
                     if os.path.exists(path): os.remove(path)
                 
-                # تصفير القائمة والأبعاد للمشاريع القادمة
                 USER_FILES[user] = []
                 USER_RES.pop(user, None)
                 await msg.delete()
