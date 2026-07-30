@@ -33,26 +33,6 @@ async def get_duration_async(file_path):
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
 
-async def get_true_resolution(file_path):
-    cmd = [FFMPEG, "-nostdin", "-i", file_path, "-vframes", "1", "-f", "null", "-"]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    stderr_str = stderr.decode('utf-8', errors='ignore')
-    
-    match = re.search(r"Output #0.*?Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str, re.DOTALL | re.IGNORECASE)
-    if match:
-        w, h = int(match.group(1)), int(match.group(2))
-        return w - (w % 2), h - (h % 2)
-    
-    match = re.search(r"Stream #\d+:\d+.*?: Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str)
-    if match:
-        w, h = int(match.group(1)), int(match.group(2))
-        return w - (w % 2), h - (h % 2)
-        
-    return 720, 1280
-
 async def has_audio_async(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
@@ -120,13 +100,32 @@ async def process_media(client, message):
             
         async with USER_LOCKS[user]:
             if user not in USER_RES:
-                w, h = await get_true_resolution(dl_path)
-                USER_RES[user] = (w, h)
-            else:
-                w, h = USER_RES[user]
+                w, h = 720, 1280
+                
+                # أخذ الأبعاد الصحيحة من سيرفرات تلجرام مباشرة لتجنب أخطاء دوران الفيديو
+                if message.video:
+                    w = message.video.width
+                    h = message.video.height
+                elif message.photo:
+                    w = message.photo.width
+                    h = message.photo.height
+                
+                # التأكد أن الأبعاد أرقام زوجية (متطلب أساسي للترميز)
+                w = w - (w % 2)
+                h = h - (h % 2)
+                
+                if w > 0 and h > 0:
+                    USER_RES[user] = (w, h)
+                else:
+                    USER_RES[user] = (720, 1280) 
+            
+            w, h = USER_RES[user]
 
-        # التعديل هنا: تم إزالة قيود التصغير، المقطع بياخذ راحته ويعبي الشاشة إذا أبعاده متناسقة
-        scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # الفلتر النهائي: 
+        # 1. scale=iw*sar:ih يمنع أي تمطيط ناتج عن بكسلات مستطيلة
+        # 2. scale=w:h:force_original_aspect_ratio يضبط الحجم على مقاس أول مقطع بالضبط
+        # 3. pad يضيف الحواف السوداء فقط للمقاطع اللي أبعادها مختلفة (مثل فيديو بالعرض)
+        scale_filter = f"scale=iw*sar:ih,scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:-1:-1:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
