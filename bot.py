@@ -98,10 +98,9 @@ async def process_media(client, message):
             duration = 3.0
             
         async with USER_LOCKS[user]:
-            # مقاس الآيفون العمودي الثابت (9:16)
             W, H = 720, 1280
 
-        # 🔥 الفلتر السحري: يكبر/يصغر المقطع ليناسب الشاشة ويضيف الحواف السوداء بدقة بدون أي تمطيط
+        # مقاس آيفون ثابت 9:16 مع حواف سوداء تامة بدون تمطيط
         scale_filter = f"scale='trunc(min({W},iw*{H}/ih)/2)*2':'trunc(min({H},ih*{W}/iw)/2)*2',pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
@@ -164,7 +163,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Merge Output
+# 3. Merge Output (آمن ومستقر 100% بدون انهيار الذاكرة)
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -192,19 +191,20 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
+        # 🔥 تم تعديل الدمج ليعيد الترميز بأمان تام لمنع خطأ Segmentation Fault (Exit Code -11)
         cmd = [
             FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats",
             "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart",
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips perfectly...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips safely...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
