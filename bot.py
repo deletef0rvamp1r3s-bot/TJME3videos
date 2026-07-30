@@ -90,7 +90,7 @@ async def process_media(client, message):
     
     try:
         dl_path = await message.download()
-        out_path = f"vid_{message.id}_{user}.mp4"
+        out_path = f"vid_{message.id}_{user}.ts"
         log_file = f"ffmpeg_err_{user}.log"
         
         duration = await get_duration_async(dl_path)
@@ -98,10 +98,11 @@ async def process_media(client, message):
             duration = 3.0
             
         async with USER_LOCKS[user]:
+            # مقاس الآيفون العمودي الثابت (9:16)
             W, H = 720, 1280
 
-        # الحل الجذري والوحيد للتمطيط: تصحيح البكسلات أولاً عبر iw*sar ثم التثبيت على 720x1280
-        scale_filter = f"scale=iw*sar:ih,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # 🔥 الفلتر السحري: يكبر/يصغر المقطع ليناسب الشاشة ويضيف الحواف السوداء بدقة بدون أي تمطيط
+        scale_filter = f"scale='trunc(min({W},iw*{H}/ih)/2)*2':'trunc(min({H},ih*{W}/iw)/2)*2',pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
@@ -110,7 +111,7 @@ async def process_media(client, message):
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
+                "-max_muxing_queue_size", "512", "-shortest", "-f", "mpegts", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
@@ -120,7 +121,7 @@ async def process_media(client, message):
                 "-vf", "setsar=1",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-max_muxing_queue_size", "512", "-shortest", "-video_track_timescale", "90000", out_path
+                "-max_muxing_queue_size", "512", "-shortest", "-f", "mpegts", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
@@ -131,7 +132,7 @@ async def process_media(client, message):
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "512", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "512", "-f", "mpegts", out_path
                 ]
             else:
                 cmd = [
@@ -141,7 +142,7 @@ async def process_media(client, message):
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "28", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-max_muxing_queue_size", "512", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "512", "-f", "mpegts", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
@@ -155,12 +156,6 @@ async def process_media(client, message):
             if os.path.exists(log_file): os.remove(log_file)
         else:
             err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
-            if os.path.exists(log_file):
-                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
-                    err_txt = '\n'.join(lines[-15:])
-                err_msg += f"\n\n**FFmpeg Log:**\n`{err_txt}`"
-                os.remove(log_file)
             await msg.edit_text(err_msg)
             
     except Exception as e:
@@ -181,7 +176,7 @@ async def merge_media(client, message):
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
         USER_FILES[user] = [] 
-        return await message.reply_text("❌ **Server deleted your files due to inactivity. Please re-upload and merge without waiting too long!**")
+        return await message.reply_text("❌ **Need at least 2 files to merge!**")
         
     PROCESSING_USERS.add(user)
     msg = await message.reply_text("⏳ **Calculating duration & starting merge...**")
@@ -204,6 +199,7 @@ async def merge_media(client, message):
             "-safe", "0",
             "-i", list_txt,
             "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
             "-movflags", "+faststart",
             out_merge
         ]
@@ -244,12 +240,6 @@ async def merge_media(client, message):
                 await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
         else:
             err_msg = f"❌ **Final merge failed. (Exit Code: {returncode})**"
-            if os.path.exists(log_file):
-                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
-                    err_txt = '\n'.join(lines[-15:])
-                err_msg += f"\n\n**Log:**\n`{err_txt}`"
-                os.remove(log_file)
             await msg.edit_text(err_msg)
             
     except Exception as e:
