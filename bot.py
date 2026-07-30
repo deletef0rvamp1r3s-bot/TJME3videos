@@ -47,8 +47,9 @@ async def run_cmd_async(cmd):
     return proc.returncode
 
 async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**"):
+    # تم تغيير stderr إلى DEVNULL لتجنب امتلاء الذاكرة المؤقتة (buffer) وتوقف البوت
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
     )
     
     last_update = 0
@@ -80,7 +81,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     await proc.wait()
     return proc.returncode
 
-# 2. Process media: Canvas set to 720x1560 to fit tall iPhone videos perfectly, adding top/bottom padding for others
+# 2. Process media
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -94,8 +95,8 @@ async def process_media(client, message):
         if duration == 0:
             duration = 3.0
             
-        # فلتر يثبت العرض على 720 والطول على 1560. مستحيل يحط حواف جانبية، وإذا المقطع أقصر بيحط حواف فوق وتحت بس.
-        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1"
+        # تم استبدال الحساب اليدوي بـ -1:-1 لتوسيط الفيديو تلقائياً وتجنب مشكلة الأبعاد الفردية
+        scale_filter = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:-1:-1:color=black,fps=30,setsar=1"
             
         if message.photo:
             cmd = [
@@ -208,7 +209,7 @@ async def merge_media(client, message):
                     "video": out_merge,
                     "caption": "✅ **Here is your merged video!**",
                     "width": 720,
-                    "height": 1560,  # تحديث الأبعاد هنا لتتوافق مع القالب الجديد
+                    "height": 1560,
                     "duration": int(final_duration)
                 }
                 if os.path.exists(thumb_path):
