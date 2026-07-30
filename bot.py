@@ -33,7 +33,6 @@ async def get_duration_async(file_path):
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
 
-# تم استبدال الدالة القديمة بدالة قوية تقرأ الأبعاد الحقيقية بعد المعالجة لتجنب أخطاء الدوران (Rotation)
 async def get_true_resolution(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path, "-vframes", "1", "-f", "null", "-"]
     proc = await asyncio.create_subprocess_exec(
@@ -42,13 +41,11 @@ async def get_true_resolution(file_path):
     _, stderr = await proc.communicate()
     stderr_str = stderr.decode('utf-8', errors='ignore')
     
-    # استخراج الأبعاد النهائية بالضبط كما ستعرض للمشاهد
     match = re.search(r"Output #0.*?Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str, re.DOTALL | re.IGNORECASE)
     if match:
         w, h = int(match.group(1)), int(match.group(2))
         return w - (w % 2), h - (h % 2)
     
-    # طريقة احتياطية في حال الفشل
     match = re.search(r"Stream #\d+:\d+.*?: Video:.*?\s(\d+)x(\d+)[,\s]", stderr_str)
     if match:
         w, h = int(match.group(1)), int(match.group(2))
@@ -128,8 +125,8 @@ async def process_media(client, message):
             else:
                 w, h = USER_RES[user]
 
-        # هذا الفلتر مستحيل يمطط المقطع. المقاطع الصغيرة تبقى صغيرة وتأخذ حواف، والمقطع الأول يبقى مثل ما هو.
-        scale_filter = f"scale=min({w}\\,iw):min({h}\\,ih):force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # التعديل هنا: تم إزالة قيود التصغير، المقطع بياخذ راحته ويعبي الشاشة إذا أبعاده متناسقة
+        scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
