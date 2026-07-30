@@ -100,42 +100,42 @@ async def process_media(client, message):
             
         if message.photo:
             cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-shortest", out_path
+                "-max_muxing_queue_size", "1024", "-shortest", out_path
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", 
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", 
                 "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-shortest", out_path
+                "-max_muxing_queue_size", "1024", "-shortest", out_path
             ]
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-t", str(duration + 0.5),
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "1024", "-video_track_timescale", "90000", out_path
                 ]
             else:
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-t", str(duration + 0.5),
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-shortest", "-video_track_timescale", "90000", out_path
+                    "-max_muxing_queue_size", "1024", "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
@@ -148,7 +148,11 @@ async def process_media(client, message):
             await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
             if os.path.exists(log_file): os.remove(log_file)
         else:
-            err_msg = "❌ **Error processing this file.**"
+            err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
+            
+            if returncode == -9 or returncode == -137:
+                err_msg += "\n\n⚠️ **CRASH DIAGNOSIS:** `Exit Code -9` means Railway forcefully killed FFmpeg because your container ran out of RAM (Out of Memory). You either need to upgrade your Railway RAM, or process smaller/shorter videos."
+                
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                     lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
@@ -192,13 +196,14 @@ async def merge_media(client, message):
                 total_dur += await get_duration_async(path)
                 
         cmd = [
-            FFMPEG, "-y", "-nostdin", "-threads", "2",
+            FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats",
             "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac",
+            "-max_muxing_queue_size", "1024",
             "-movflags", "+faststart",
             out_merge
         ]
@@ -241,7 +246,11 @@ async def merge_media(client, message):
             except Exception as e:
                 await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
         else:
-            err_msg = "❌ **Final merge failed.**"
+            err_msg = f"❌ **Final merge failed. (Exit Code: {returncode})**"
+            
+            if returncode == -9 or returncode == -137:
+                err_msg += "\n\n⚠️ **CRASH DIAGNOSIS:** `Exit Code -9` means Out of Memory during merge."
+                
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                     lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
