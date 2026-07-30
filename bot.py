@@ -19,7 +19,7 @@ USER_FILES = defaultdict(list)
 PROCESSING_USERS = set()
 
 async def get_duration_async(file_path):
-    cmd = [FFMPEG, "-i", file_path]
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -32,7 +32,7 @@ async def get_duration_async(file_path):
     return 0.0
 
 async def has_audio_async(file_path):
-    cmd = [FFMPEG, "-i", file_path]
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -100,7 +100,7 @@ async def process_media(client, message):
             
         if message.photo:
             cmd = [
-                FFMPEG, "-y", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
+                FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                 "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -109,7 +109,7 @@ async def process_media(client, message):
             ]
         elif message.audio or message.voice:
             cmd = [
-                FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", 
+                FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", 
                 "-f", "lavfi", "-i", "color=c=black:s=720x1560:r=30",
                 "-i", dl_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
@@ -119,9 +119,8 @@ async def process_media(client, message):
         else:
             has_a = await has_audio_async(dl_path)
             if has_a:
-                # أضفنا -t لتحديد المدة بدقة وإجبار FFmpeg على الخروج فور انتهاء الفيديو وعدم التعليق في النهاية
                 cmd = [
-                    FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-t", str(duration + 0.5),
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", 
@@ -130,7 +129,7 @@ async def process_media(client, message):
                 ]
             else:
                 cmd = [
-                    FFMPEG, "-y", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
+                    FFMPEG, "-y", "-nostdin", "-threads", "2", "-progress", "pipe:1", "-fflags", "+genpts", "-i", dl_path,
                     "-t", str(duration + 0.5),
                     "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                     "-vf", scale_filter,
@@ -139,7 +138,7 @@ async def process_media(client, message):
                     "-shortest", "-video_track_timescale", "90000", out_path
                 ]
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media (Final Fix)...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
         
         if os.path.exists(dl_path): 
             os.remove(dl_path)
@@ -152,8 +151,7 @@ async def process_media(client, message):
             err_msg = "❌ **Error processing this file.**"
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read().replace('\r', '\n')
-                    lines = [line.strip() for line in log_content.split('\n') if line.strip()]
+                    lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
                     err_txt = '\n'.join(lines[-15:])
                 err_msg += f"\n\n**FFmpeg Log:**\n`{err_txt}`"
                 os.remove(log_file)
@@ -194,7 +192,7 @@ async def merge_media(client, message):
                 total_dur += await get_duration_async(path)
                 
         cmd = [
-            FFMPEG, "-y",
+            FFMPEG, "-y", "-nostdin", "-threads", "2",
             "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
@@ -211,7 +209,7 @@ async def merge_media(client, message):
             await msg.edit_text("📤 **Merge Complete! Generating Thumbnail...**")
             
             thumb_cmd = [
-                FFMPEG, "-y", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
+                FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
                 "-vf", "scale=320:320:force_original_aspect_ratio=decrease", 
                 thumb_path
             ]
@@ -246,8 +244,7 @@ async def merge_media(client, message):
             err_msg = "❌ **Final merge failed.**"
             if os.path.exists(log_file):
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read().replace('\r', '\n')
-                    lines = [line.strip() for line in log_content.split('\n') if line.strip()]
+                    lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("frame=")]
                     err_txt = '\n'.join(lines[-15:])
                 err_msg += f"\n\n**Log:**\n`{err_txt}`"
                 os.remove(log_file)
