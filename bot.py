@@ -98,11 +98,10 @@ async def process_media(client, message):
             duration = 3.0
             
         async with USER_LOCKS[user]:
-            # مقاس الآيفون الثابت للجميع بدون نقاش
             W, H = 720, 1280
 
-        # أمر صريح: لا تمطط أي شيء، حط حواف سوداء إذا الحجم مختلف
-        scale_filter = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
+        # الحل الجذري والوحيد للتمطيط: تصحيح البكسلات أولاً عبر iw*sar ثم التثبيت على 720x1280
+        scale_filter = f"scale=iw*sar:ih,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
