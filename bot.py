@@ -32,13 +32,14 @@ async def get_duration_async(file_path):
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
 
-async def has_audio_async(file_path):
+async def check_streams_async(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
-    return b"Audio:" in stderr
+    stderr_str = stderr.decode('utf-8', errors='ignore')
+    return "Video:" in stderr_str, "Audio:" in stderr_str
 
 async def run_cmd_async(cmd):
     proc = await asyncio.create_subprocess_exec(
@@ -82,7 +83,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         await proc.wait()
         return proc.returncode
 
-# 2. Process media
+# 2. Process media (توحيد وتصفية كل الملفات لمنع الانهيار)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -90,7 +91,7 @@ async def process_media(client, message):
     
     try:
         dl_path = await message.download()
-        out_path = f"vid_{message.id}_{user}.ts"
+        out_path = f"vid_{message.id}_{user}.mp4"
         log_file = f"ffmpeg_err_{user}.log"
         
         duration = await get_duration_async(dl_path)
@@ -100,47 +101,59 @@ async def process_media(client, message):
         async with USER_LOCKS[user]:
             W, H = 720, 1280
 
-        # الفلتر الجديد: يضبط المقاس بدون تمطيط ويضع حواف سوداء ذكية
+        # مقاس آيفون ثابت مع حواف سوداء وتوسيط بدون أي تمطيط
         scale_filter = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30"
             
         if message.photo:
             cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-loop", "1", "-t", "3", "-i", dl_path,
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-map", "0:v:0", "-map", "1:a:0",
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-f", "mpegts", out_path
-            ]
-        elif message.audio or message.voice:
-            cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1",
-                "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
-                "-i", dl_path,
-                "-vf", "setsar=1",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-shortest", "-f", "mpegts", out_path
+                "-shortest", out_path
             ]
         else:
-            has_a = await has_audio_async(dl_path)
-            if has_a:
+            has_v, has_a = await check_streams_async(dl_path)
+            
+            if has_v and has_a:
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-i", dl_path,
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-i", dl_path,
+                    "-map", "0:v:0", "-map", "0:a:0",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-f", "mpegts", out_path
+                    out_path
+                ]
+            elif has_v and not has_a:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-i", dl_path,
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-vf", scale_filter,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-shortest", out_path
+                ]
+            elif not has_v and has_a:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
+                    "-i", dl_path,
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-vf", "setsar=1",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-shortest", out_path
                 ]
             else:
-                cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-nostats", "-progress", "pipe:1", "-i", dl_path,
-                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-shortest", "-f", "mpegts", out_path
-                ]
+                await msg.edit_text("❌ **الملف غير مدعوم أو لا يحتوي على مسار فيديو/صوت صالح.**")
+                if os.path.exists(dl_path): os.remove(dl_path)
+                return
 
         returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
         
@@ -161,7 +174,7 @@ async def process_media(client, message):
         except MessageNotModified: 
             pass
 
-# 3. Merge Output (تم حل مشكلة الانهيار - آمن وسريع 100%)
+# 3. Merge Output (دمج صاروخي ومستحيل ينهار)
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
@@ -189,9 +202,10 @@ async def merge_media(client, message):
                 f.write(f"file '{os.path.abspath(path)}'\n")
                 total_dur += await get_duration_async(path)
                 
-        # 🚀 التعديل الأهم: استخدام c copy لنسخ المسارات بدون إعادة ترميز لمنع الخطأ -11
+        # استخدام النسخ المباشر للمسارات (c copy) لأنه آمن الآن بعد أن وحدنا كل الفيديوهات في الخطوة السابقة
         cmd = [
             FFMPEG, "-y", "-nostdin",
+            "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
             "-i", list_txt,
@@ -200,7 +214,6 @@ async def merge_media(client, message):
             out_merge
         ]
         
-        # لأن العملية أصبحت نسخ فقط، ستنتهي في ثوانٍ معدودة ولن تضغط على الرام
         returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips instantly...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
