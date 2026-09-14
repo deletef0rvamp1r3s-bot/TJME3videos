@@ -1,4 +1,4 @@
-import asyncio
+Import asyncio
 import os
 import re
 import time
@@ -7,287 +7,288 @@ import imageio_ffmpeg
 from pyrogram import Client, filters
 from pyrogram.errors import MessageNotModified
 
-# --- Environment Setup ---
-ENV_A1 = int(os.environ.get("API_ID", 0))
-ENV_B2 = os.environ.get("API_HASH", "")
-ENV_C3 = os.environ.get("BOT_TOKEN", "")
+# 1. Bot Setup
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Initialize core node
-core_node = Client("worker_node_alpha", api_id=ENV_A1, api_hash=ENV_B2, bot_token=ENV_C3)
-BIN_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+app = Client("railway_optimal_merger", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-# --- Memory Allocation ---
-temp_vault = defaultdict(list)
-sync_mutex = defaultdict(asyncio.Lock)
-busy_nodes = set()
-_dummy_hash_verify = "0x84A9F2" # Unused flag for structural change
+USER_FILES = defaultdict(list)
+USER_LOCKS = defaultdict(asyncio.Lock)
+PROCESSING_USERS = set()
 
-async def probe_media_length(source_file):
-    base_cmd = [BIN_PATH, "-nostdin", "-i", source_file]
-    sub_proc = await asyncio.create_subprocess_exec(
-        *base_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+async def get_duration_async(file_path):
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    _, err_stream = await sub_proc.communicate()
-    parsed_err = err_stream.decode('utf-8', errors='ignore')
-    time_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", parsed_err)
-    if time_match:
-        h, m, s = time_match.groups()
-        return float(h) * 3600 + float(m) * 60 + float(s)
+    _, stderr = await proc.communicate()
+    stderr_str = stderr.decode('utf-8', errors='ignore')
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr_str)
+    if match:
+        hours, minutes, seconds = match.groups()
+        return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
     return 0.0
 
-async def validate_data_streams(source_file):
-    base_cmd = [BIN_PATH, "-nostdin", "-i", source_file]
-    sub_proc = await asyncio.create_subprocess_exec(
-        *base_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+async def check_streams_async(file_path):
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    _, err_stream = await sub_proc.communicate()
-    parsed_err = err_stream.decode('utf-8', errors='ignore')
-    return "Video:" in parsed_err, "Audio:" in parsed_err
+    _, stderr = await proc.communicate()
+    stderr_str = stderr.decode('utf-8', errors='ignore')
+    return "Video:" in stderr_str, "Audio:" in stderr_str
 
-async def execute_silent_task(command_list):
-    sub_proc = await asyncio.create_subprocess_exec(
-        *command_list, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+async def run_cmd_async(cmd):
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    await sub_proc.communicate()
-    return sub_proc.returncode
+    await proc.communicate()
+    return proc.returncode
 
-async def dispatch_task_with_tracker(command_list, max_time, ui_ref, title="**Working...**", trace_log="sys_trace.log"):
-    with open(trace_log, "w", encoding="utf-8") as dump_file:
-        sub_proc = await asyncio.create_subprocess_exec(
-            *command_list, stdout=asyncio.subprocess.PIPE, stderr=dump_file
+async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**", log_file="ffmpeg_error.log"):
+    with open(log_file, "w", encoding="utf-8") as err_file:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file
         )
         
-        last_tick = 0
-        regex_ms = re.compile(r"out_time_ms=(\d+)")
+        last_update = 0
+        pattern = re.compile(r"out_time_ms=(\d+)")
         
         while True:
-            stdout_line = await sub_proc.stdout.readline()
-            if not stdout_line:
+            line = await proc.stdout.readline()
+            if not line:
                 break
-            raw_str = stdout_line.decode("utf-8", errors="ignore").strip()
-            found_ms = regex_ms.search(raw_str)
+            line_str = line.decode("utf-8", errors="ignore").strip()
+            match = pattern.search(line_str)
             
-            if found_ms and max_time > 0:
-                current_val = int(found_ms.group(1))
-                sec_val = current_val / 1000000.0
-                ratio = min(100, int((sec_val / max_time) * 100))
+            if match and total_duration > 0:
+                current_ms = int(match.group(1))
+                current_sec = current_ms / 1000000.0
+                percent = min(100, int((current_sec / total_duration) * 100))
                 
-                blocks = int(ratio / 10)
-                progress_bar = "█" * blocks + "░" * (10 - blocks)
+                filled = int(percent / 10)
+                bar = "█" * filled + "░" * (10 - filled)
                 
-                current_tick = time.time()
-                if current_tick - last_tick >= 3:
-                    last_tick = current_tick
+                now = time.time()
+                if now - last_update >= 3:
+                    last_update = now
                     try:
-                        await ui_ref.edit_text(f"{title}\n\n📊 **Status: {ratio}%**\n`[{progress_bar}]`")
+                        await msg.edit_text(f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
                     except Exception:
                         pass
                         
-        await sub_proc.wait()
-        return sub_proc.returncode
+        await proc.wait()
+        return proc.returncode
 
-# 2. Ingest & Normalize Payload
-@core_node.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
-async def handle_incoming_payload(client, ctx):
-    sender_uid = ctx.from_user.id
-    ui_ref = await ctx.reply_text("📥 **Fetching payload from cloud...**")
+# 2. Process media (فلترة حواف ذكية بدون تمطيط)
+@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
+async def process_media(client, message):
+    user = message.from_user.id
+    msg = await message.reply_text("📥 **Downloading media from Telegram...**")
     
     try:
-        raw_input = await ctx.download()
-        processed_out = f"norm_{ctx.id}_{sender_uid}.mp4"
-        trace_log = f"trace_{sender_uid}.log"
+        dl_path = await message.download()
+        out_path = f"vid_{message.id}_{user}.mp4"
+        log_file = f"ffmpeg_err_{user}.log"
         
-        media_len = await probe_media_length(raw_input)
-        if media_len == 0:
-            media_len = 3.0
+        duration = await get_duration_async(dl_path)
+        if duration == 0:
+            duration = 3.0
             
-        async with sync_mutex[sender_uid]:
-            X_RES, Y_RES = 720, 1280
+        async with USER_LOCKS[user]:
+            W, H = 720, 1280
 
-        # Smart normalization layer
-        smart_matrix = f"setsar=1,scale={X_RES}:{Y_RES}:force_original_aspect_ratio=decrease,pad={X_RES}:{Y_RES}:-1:-1:color=black,setdar=9/16,fps=30"
+        # الفلتر الأذكى: توسيط تلقائي (-1:-1) وإجبار نسبة العرض 9:16
+        scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:-1:-1:color=black,setdar=9/16,fps=30"
             
-        if ctx.photo:
-            task_cmd = [
-                BIN_PATH, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                "-loop", "1", "-framerate", "30", "-t", "3", "-i", raw_input,
+        if message.photo:
+            cmd = [
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
                 "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-map", "0:v:0", "-map", "1:a:0",
-                "-vf", smart_matrix,
+                "-vf", scale_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                 "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-shortest", processed_out
+                "-shortest", out_path
             ]
         else:
-            v_flag, a_flag = await validate_data_streams(raw_input)
+            has_v, has_a = await check_streams_async(dl_path)
             
-            if v_flag and a_flag:
-                task_cmd = [
-                    BIN_PATH, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-i", raw_input,
+            if has_v and has_a:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-i", dl_path,
                     "-map", "0:v:0", "-map", "0:a:0",
-                    "-vf", smart_matrix,
+                    "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    processed_out
+                    out_path
                 ]
-            elif v_flag and not a_flag:
-                task_cmd = [
-                    BIN_PATH, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-i", raw_input,
+            elif has_v and not has_a:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-i", dl_path,
                     "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-map", "0:v:0", "-map", "1:a:0",
-                    "-vf", smart_matrix,
+                    "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-shortest", processed_out
+                    "-shortest", out_path
                 ]
-            elif not v_flag and a_flag:
-                task_cmd = [
-                    BIN_PATH, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-f", "lavfi", "-i", f"color=c=black:s={X_RES}x{Y_RES}:r=30",
-                    "-i", raw_input,
+            elif not has_v and has_a:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
+                    "-i", dl_path,
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-vf", "setdar=9/16",
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-shortest", processed_out
+                    "-shortest", out_path
                 ]
             else:
-                await ui_ref.edit_text("❌ **Invalid data streams detected.**")
-                if os.path.exists(raw_input): os.remove(raw_input)
+                await msg.edit_text("❌ **الملف غير مدعوم أو لا يحتوي على مسار فيديو/صوت صالح.**")
+                if os.path.exists(dl_path): os.remove(dl_path)
                 return
 
-        exit_code = await dispatch_task_with_tracker(task_cmd, media_len, ui_ref, "⚙️ **Normalizing Payload...**", trace_log)
+        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
         
-        if os.path.exists(raw_input): 
-            os.remove(raw_input)
+        if os.path.exists(dl_path): 
+            os.remove(dl_path)
         
-        if exit_code == 0 and os.path.exists(processed_out) and os.path.getsize(processed_out) > 0:
-            temp_vault[sender_uid].append(processed_out)
-            await ui_ref.edit_text(f"✅ **Payload Cached!**\n📋 **Vault Size: ({len(temp_vault[sender_uid])})**\n\n• /show : View\n• /merge : Compile\n• /clear : Flush")
-            if os.path.exists(trace_log): os.remove(trace_log)
+        if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            USER_FILES[user].append(out_path)
+            await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
+            if os.path.exists(log_file): os.remove(log_file)
         else:
-            await ui_ref.edit_text(f"❌ **Normalization failed. (Code: {exit_code})**")
+            err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
+            await msg.edit_text(err_msg)
             
-    except Exception as err:
+    except Exception as e:
         try: 
-            await ui_ref.edit_text(f"❌ **Transaction dropped.**\n`{err}`")
+            await msg.edit_text(f"❌ **Download or processing failed.**\n`{e}`")
         except MessageNotModified: 
             pass
 
-# 3. Compile Chunks
-@core_node.on_message(filters.private & filters.command(["merge", "دمج"]))
-async def compile_cached_chunks(client, ctx):
-    sender_uid = ctx.from_user.id
+# 3. Merge Output (إرسال مع إجبار تليجرام على عرض الآيفون 9:16)
+@app.on_message(filters.private & filters.command(["merge", "دمج"]))
+async def merge_media(client, message):
+    user = message.from_user.id
     
-    if sender_uid in busy_nodes:
-        return await ctx.reply_text("⏳ **Worker is busy, hold on...**")
+    if user in PROCESSING_USERS:
+        return await message.reply_text("⏳ **Merge is already in progress, please wait...**")
         
-    chunk_list = temp_vault.get(sender_uid, [])
-    safe_chunks = [c for c in chunk_list if os.path.exists(c)]
-    if len(safe_chunks) < 2:
-        temp_vault[sender_uid] = [] 
-        return await ctx.reply_text("❌ **Require at least 2 payloads to compile!**")
+    files = USER_FILES.get(user, [])
+    valid_files = [f for f in files if os.path.exists(f)]
+    if len(valid_files) < 2:
+        USER_FILES[user] = [] 
+        return await message.reply_text("❌ **Need at least 2 files to merge!**")
         
-    busy_nodes.add(sender_uid)
-    ui_ref = await ctx.reply_text("⏳ **Initializing compilation matrix...**")
-    manifest = f"manifest_{sender_uid}.txt"
-    final_render = f"render_{sender_uid}.mp4"
-    cover_art = f"cover_{sender_uid}.jpg"
-    trace_log = f"compile_trace_{sender_uid}.log"
+    PROCESSING_USERS.add(user)
+    msg = await message.reply_text("⏳ **Starting lightning fast merge...**")
+    list_txt = f"list_{user}.txt"
+    out_merge = f"final_{user}.mp4"
+    thumb_path = f"thumb_{user}.jpg"
+    log_file = f"ffmpeg_merge_err_{user}.log"
     
     try:
-        agg_time = 0.0
-        with open(manifest, "w", encoding="utf-8") as f_out:
-            for item in safe_chunks:
-                f_out.write(f"file '{os.path.abspath(item)}'\n")
-                agg_time += await probe_media_length(item)
+        total_dur = 0.0
+        with open(list_txt, "w", encoding="utf-8") as f:
+            for path in valid_files:
+                f.write(f"file '{os.path.abspath(path)}'\n")
+                total_dur += await get_duration_async(path)
                 
-        task_cmd = [
-            BIN_PATH, "-y", "-nostdin",
+        cmd = [
+            FFMPEG, "-y", "-nostdin",
             "-progress", "pipe:1",
             "-f", "concat",
             "-safe", "0",
-            "-i", manifest,
+            "-i", list_txt,
             "-c", "copy",
             "-movflags", "+faststart",
-            final_render
+            out_merge
         ]
         
-        exit_code = await dispatch_task_with_tracker(task_cmd, agg_time, ui_ref, "🔄 **Linking chunks...**", trace_log)
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips instantly...**", log_file)
         
-        if exit_code == 0 and os.path.exists(final_render) and os.path.getsize(final_render) > 0:
-            await ui_ref.edit_text("📤 **Compilation Finished! Pushing to network...**")
+        if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
+            await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
-            # Generate static frame
-            art_cmd = [
-                BIN_PATH, "-y", "-nostdin", "-i", final_render, "-ss", "00:00:00.500", "-vframes", "1",
+            # صنع صورة مصغرة أبعادها 9:16 (طولية) عشان تليجرام ما يستعبط
+            thumb_cmd = [
+                FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
                 "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:-1:-1:color=black", 
-                cover_art
+                thumb_path
             ]
-            await execute_silent_task(art_cmd)
+            await run_cmd_async(thumb_cmd)
             
-            total_runtime = await probe_media_length(final_render)
+            final_duration = await get_duration_async(out_merge)
             
             try:
-                push_args = {
-                    "chat_id": sender_uid,
-                    "video": final_render,
-                    "caption": "✅ **Compilation Delivered!**",
-                    "duration": int(total_runtime),
+                # أضفنا width و height عشان نجبر تليجرام يعرض الفيديو بشكل طولي
+                kwargs = {
+                    "chat_id": user,
+                    "video": out_merge,
+                    "caption": "✅ **Here is your merged video!**",
+                    "duration": int(final_duration),
                     "width": 720,
                     "height": 1280
                 }
-                if os.path.exists(cover_art):
-                    push_args["thumb"] = cover_art
+                if os.path.exists(thumb_path):
+                    kwargs["thumb"] = thumb_path
 
-                await client.send_video(**push_args)
+                await client.send_video(**kwargs)
                 
-                for item in safe_chunks:
-                    if os.path.exists(item): os.remove(item)
+                for path in valid_files:
+                    if os.path.exists(path): os.remove(path)
                 
-                temp_vault[sender_uid] = []
-                await ui_ref.delete()
+                USER_FILES[user] = []
+                await msg.delete()
                 
-            except Exception as err:
-                await ui_ref.edit_text(f"❌ **Push failed.**\nTrace: `{err}`")
+            except Exception as e:
+                await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
         else:
-            await ui_ref.edit_text(f"❌ **Linking failed. (Code: {exit_code})**")
+            err_msg = f"❌ **Final merge failed. (Exit Code: {returncode})**"
+            await msg.edit_text(err_msg)
             
-    except Exception as err:
+    except Exception as e:
         try: 
-            await ui_ref.edit_text(f"❌ **Fatal error during runtime:**\n`{err}`")
+            await msg.edit_text(f"❌ **An unexpected error occurred during merge:**\n`{e}`")
         except MessageNotModified: 
             pass
     finally:
-        if os.path.exists(manifest): os.remove(manifest)
-        if os.path.exists(final_render): os.remove(final_render)
-        if os.path.exists(cover_art): os.remove(cover_art)
-        if os.path.exists(trace_log): os.remove(trace_log)
-        busy_nodes.discard(sender_uid)
+        if os.path.exists(list_txt): os.remove(list_txt)
+        if os.path.exists(out_merge): os.remove(out_merge)
+        if os.path.exists(thumb_path): os.remove(thumb_path)
+        if os.path.exists(log_file): os.remove(log_file)
+        PROCESSING_USERS.discard(user)
 
-@core_node.on_message(filters.private & filters.command(["show", "عرض"]))
-async def inspect_vault(client, ctx):
-    sender_uid = ctx.from_user.id
-    chunk_list = temp_vault.get(sender_uid, [])
-    safe_chunks = [c for c in chunk_list if os.path.exists(c)]
+@app.on_message(filters.private & filters.command(["show", "عرض"]))
+async def show_media(client, message):
+    user = message.from_user.id
+    files = USER_FILES.get(user, [])
+    valid_files = [f for f in files if os.path.exists(f)]
+    count = len(valid_files)
     
-    if len(safe_chunks) == 0:
-        temp_vault[sender_uid] = []
-        await ctx.reply_text("📭 **Vault is clean.**")
+    if count == 0:
+        USER_FILES[user] = []
+        await message.reply_text("📭 **Your list is currently empty.**")
     else:
-        await ctx.reply_text(f"📋 **Vault Diagnostics:**\n• **Blocks Ready:** **({len(safe_chunks)})**\n\n• /merge : Compile\n• /clear : Flush")
+        await message.reply_text(f"📋 **Current List Status:**\n• **Clips Ready:** **({count})**\n\n• Send /merge to merge\n• Send /clear to clear")
 
-@core_node.on_message(filters.private & filters.command(["clear", "مسح"]))
-async def purge_vault(client, ctx):
-    sender_uid = ctx.from_user.id
-    for item in temp_vault.get(sender_uid, []):
-        if os.path.exists(item): 
-            os.remove(item)
-    temp_vault[sender_uid] = []
-    await ctx.reply_text("🗑️ **Vault flushed and memory reallocated.**")
+@app.on_message(filters.private & filters.command(["clear", "مسح"]))
+async def clear_media(client, message):
+    user = message.from_user.id
+    for path in USER_FILES.get(user, []):
+        if os.path.exists(path): 
+            os.remove(path)
+    USER_FILES[user] = []
+    await message.reply_text("🗑️ **List cleared and memory freed successfully.**")
 
 if __name__ == "__main__":
-    print("🚀 Worker node initialized on target host...")
-    core_node.run()
+    print("🤖 Bot is running smoothly on Railway...")
+    app.run()
