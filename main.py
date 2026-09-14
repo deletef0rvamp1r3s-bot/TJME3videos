@@ -101,8 +101,8 @@ async def process_media(client, message):
         async with USER_LOCKS[user]:
             W, H = 720, 1280
 
-        # الفلتر الأذكى: توسيط تلقائي (-1:-1) وإجبار نسبة العرض 9:16
-        scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:-1:-1:color=black,setdar=9/16,fps=30"
+        # الفلتر الأذكى: ملء الشاشة وقص الأطراف (بدون تمطيط وبدون حواف سوداء)
+        scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setdar=9/16,fps=30"
             
         if message.photo:
             cmd = [
@@ -218,10 +218,10 @@ async def merge_media(client, message):
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
-            # صنع صورة مصغرة أبعادها 9:16 (طولية) عشان تليجرام ما يستعبط
+            # صنع صورة مصغرة مطابقة للصيغة الجديدة بدون حواف سوداء
             thumb_cmd = [
                 FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
-                "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:-1:-1:color=black", 
+                "-vf", "scale=360:640:force_original_aspect_ratio=increase,crop=360:640", 
                 thumb_path
             ]
             await run_cmd_async(thumb_cmd)
