@@ -83,12 +83,11 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         await proc.wait()
         return proc.returncode
 
-# 2. Process media (معالجة متسلسلة فريدة بدون تضارب أوفايل كراش)
+# 2. Process media (معالجة متسلسلة فريدة بدون تضارب أخطاء المسار)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
     
-    # تحديد امتداد الملف لتفادي أخطاء المجلدات المؤقتة
     ext = ".mp4"
     if message.video and message.video.file_name:
         _, e = os.path.splitext(message.video.file_name)
@@ -97,19 +96,22 @@ async def process_media(client, message):
         _, e = os.path.splitext(message.document.file_name)
         if e: ext = e
 
-    dl_path = f"dl_{message.id}_{user}{ext}"
+    # هذا مجرد اسم مقترح للملف
+    dl_name = f"dl_{message.id}_{user}{ext}"
     out_path = f"vid_{message.id}_{user}.mp4"
     log_file = f"ffmpeg_err_{message.id}_{user}.log"
 
     msg = await message.reply_text("⏳ **Queued for processing...**")
 
-    # القفل لمنع المعالجة بالتوازي وحماية الرام ومنع تضارب التنزيل
+    # القفل لمنع المعالجة بالتوازي وحماية الرام
     async with USER_LOCKS[user]:
         try:
             await msg.edit_text("📥 **Downloading media from Telegram...**")
-            await message.download(file_name=dl_path)
             
-            if not os.path.exists(dl_path):
+            # التعديل هنا: حفظ المسار الحقيقي الكامل الذي ترجعه مكتبة Pyrogram
+            dl_path = await message.download(file_name=dl_name)
+            
+            if not dl_path or not os.path.exists(dl_path):
                 await msg.edit_text("❌ **Download failed: File not found.**")
                 return
 
@@ -119,7 +121,6 @@ async def process_media(client, message):
                 
             W, H = 720, 1280
 
-            # الفلتر الذكي بدون زوم مع تحديد أبعاد 9:16
             scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setdar=9/16,fps=30"
                 
             if message.photo:
@@ -191,7 +192,7 @@ async def process_media(client, message):
             except MessageNotModified: 
                 pass
         finally:
-            if os.path.exists(dl_path):
+            if dl_path and isinstance(dl_path, str) and os.path.exists(dl_path):
                 try: os.remove(dl_path)
                 except Exception: pass
             if os.path.exists(log_file):
