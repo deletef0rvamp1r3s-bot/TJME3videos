@@ -83,96 +83,120 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         await proc.wait()
         return proc.returncode
 
-# 2. Process media 
+# 2. Process media (معالجة متسلسلة فريدة بدون تضارب أوفايل كراش)
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
-    msg = await message.reply_text("📥 **Downloading media from Telegram...**")
     
-    try:
-        dl_path = await message.download()
-        out_path = f"vid_{message.id}_{user}.mp4"
-        log_file = f"ffmpeg_err_{user}.log"
-        
-        duration = await get_duration_async(dl_path)
-        if duration == 0:
-            duration = 3.0
+    # تحديد امتداد الملف لتفادي أخطاء المجلدات المؤقتة
+    ext = ".mp4"
+    if message.video and message.video.file_name:
+        _, e = os.path.splitext(message.video.file_name)
+        if e: ext = e
+    elif message.document and message.document.file_name:
+        _, e = os.path.splitext(message.document.file_name)
+        if e: ext = e
+
+    dl_path = f"dl_{message.id}_{user}{ext}"
+    out_path = f"vid_{message.id}_{user}.mp4"
+    log_file = f"ffmpeg_err_{message.id}_{user}.log"
+
+    msg = await message.reply_text("⏳ **Queued for processing...**")
+
+    # القفل لمنع المعالجة بالتوازي وحماية الرام ومنع تضارب التنزيل
+    async with USER_LOCKS[user]:
+        try:
+            await msg.edit_text("📥 **Downloading media from Telegram...**")
+            await message.download(file_name=dl_path)
             
-        async with USER_LOCKS[user]:
+            if not os.path.exists(dl_path):
+                await msg.edit_text("❌ **Download failed: File not found.**")
+                return
+
+            duration = await get_duration_async(dl_path)
+            if duration == 0:
+                duration = 3.0
+                
             W, H = 720, 1280
 
-        # تم حل المشكلة هنا: استخدام decrease و pad لعرض المقطع كاملاً بدون زوم
-        scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setdar=9/16,fps=30"
-            
-        if message.photo:
-            cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
-                "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", 
-                "-shortest", out_path
-            ]
-        else:
-            has_v, has_a = await check_streams_async(dl_path)
-            
-            if has_v and has_a:
+            # الفلتر الذكي بدون زوم مع تحديد أبعاد 9:16
+            scale_filter = f"setsar=1,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,setdar=9/16,fps=30"
+                
+            if message.photo:
                 cmd = [
                     FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-i", dl_path,
-                    "-map", "0:v:0", "-map", "0:a:0",
-                    "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    out_path
-                ]
-            elif has_v and not has_a:
-                cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-i", dl_path,
-                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
+                    "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-vf", scale_filter,
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                    "-shortest", out_path
-                ]
-            elif not has_v and has_a:
-                cmd = [
-                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
-                    "-i", dl_path,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-vf", "setdar=9/16",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-max_muxing_queue_size", "1024",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", 
                     "-shortest", out_path
                 ]
             else:
-                await msg.edit_text("❌ **الملف غير مدعوم أو لا يحتوي على مسار فيديو/صوت صالح.**")
-                if os.path.exists(dl_path): os.remove(dl_path)
-                return
+                has_v, has_a = await check_streams_async(dl_path)
+                
+                if has_v and has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-map", "0:v:0", "-map", "0:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        out_path
+                    ]
+                elif has_v and not has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
+                elif not has_v and has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
+                        "-i", dl_path,
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", "setdar=9/16",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
+                else:
+                    await msg.edit_text("❌ **الملف غير مدعوم أو لا يحتوي على مسار فيديو/صوت صالح.**")
+                    return
 
-        returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
-        
-        if os.path.exists(dl_path): 
-            os.remove(dl_path)
-        
-        if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            USER_FILES[user].append(out_path)
-            await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
-            if os.path.exists(log_file): os.remove(log_file)
-        else:
-            err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
-            await msg.edit_text(err_msg)
+            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
             
-    except Exception as e:
-        try: 
-            await msg.edit_text(f"❌ **Download or processing failed.**\n`{e}`")
-        except MessageNotModified: 
-            pass
+            if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                USER_FILES[user].append(out_path)
+                await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
+            else:
+                err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
+                await msg.edit_text(err_msg)
+                
+        except Exception as e:
+            try: 
+                await msg.edit_text(f"❌ **Download or processing failed.**\n`{e}`")
+            except MessageNotModified: 
+                pass
+        finally:
+            if os.path.exists(dl_path):
+                try: os.remove(dl_path)
+                except Exception: pass
+            if os.path.exists(log_file):
+                try: os.remove(log_file)
+                except Exception: pass
 
 # 3. Merge Output
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
@@ -218,7 +242,6 @@ async def merge_media(client, message):
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
-            # تم إصلاح فلتر الصورة المصغرة لمنع زوم المعاينة
             thumb_cmd = [
                 FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
                 "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2:black", 
@@ -240,11 +263,12 @@ async def merge_media(client, message):
                 if os.path.exists(thumb_path):
                     kwargs["thumb"] = thumb_path
 
-                # تفعيل supports_streaming لمنع تقطيع العرض على تليجرام
                 await client.send_video(**kwargs, supports_streaming=True)
                 
                 for path in valid_files:
-                    if os.path.exists(path): os.remove(path)
+                    if os.path.exists(path): 
+                        try: os.remove(path)
+                        except Exception: pass
                 
                 USER_FILES[user] = []
                 await msg.delete()
@@ -261,10 +285,18 @@ async def merge_media(client, message):
         except MessageNotModified: 
             pass
     finally:
-        if os.path.exists(list_txt): os.remove(list_txt)
-        if os.path.exists(out_merge): os.remove(out_merge)
-        if os.path.exists(thumb_path): os.remove(thumb_path)
-        if os.path.exists(log_file): os.remove(log_file)
+        if os.path.exists(list_txt):
+            try: os.remove(list_txt)
+            except Exception: pass
+        if os.path.exists(out_merge):
+            try: os.remove(out_merge)
+            except Exception: pass
+        if os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except Exception: pass
+        if os.path.exists(log_file):
+            try: os.remove(log_file)
+            except Exception: pass
         PROCESSING_USERS.discard(user)
 
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
@@ -285,7 +317,8 @@ async def clear_media(client, message):
     user = message.from_user.id
     for path in USER_FILES.get(user, []):
         if os.path.exists(path): 
-            os.remove(path)
+            try: os.remove(path)
+            except Exception: pass
     USER_FILES[user] = []
     await message.reply_text("🗑️ **List cleared and memory freed successfully.**")
 
