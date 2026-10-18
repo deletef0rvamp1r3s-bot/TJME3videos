@@ -317,13 +317,13 @@ async def merge_media(client, message):
         if os.path.exists(out_merge):
             try: os.remove(out_merge)
             except Exception: pass
-if os.path.exists(thumb_path):
-    try: os.remove(thumb_path)
-    except Exception: pass
-if os.path.exists(log_file):
-    try: os.remove(log_file)
-    except Exception: pass
-PROCESSING_USERS.discard(user)
+        if os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except Exception: pass
+        if os.path.exists(log_file):
+            try: os.remove(log_file)
+            except Exception: pass
+        PROCESSING_USERS.discard(user)
 
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
 async def show_media(client, message):
