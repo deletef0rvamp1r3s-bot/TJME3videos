@@ -30,38 +30,47 @@ async def get_duration_async(file_path):
     if match:
         hours, minutes, seconds = match.groups()
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-    return 0.0
+    return 3.0
 
 async def get_video_dimensions_async(file_path):
-    """الحصول على أبعاد الفيديو"""
-    cmd = [FFMPEG, "-nostdin", "-i", file_path]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    stderr_str = stderr.decode('utf-8', errors='ignore')
-    match = re.search(r"(\d{2,5})\s*x\s*(\d{2,5})", stderr_str)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    return 1280, 720
+    """استخراج أبعاد الفيديو - مبسط وموثوق"""
+    try:
+        cmd = [FFMPEG, "-nostdin", "-i", file_path]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        stderr_str = stderr.decode('utf-8', errors='ignore')
+        
+        # البحث عن دقة الفيديو
+        match = re.search(r"(\d{2,5})\s*x\s*(\d{2,5})", stderr_str)
+        if match:
+            w, h = int(match.group(1)), int(match.group(2))
+            # تحقق من أن الأبعاد معقولة
+            if 100 <= w <= 4000 and 100 <= h <= 4000:
+                return w, h
+        return 1280, 720
+    except Exception as e:
+        print(f"❌ خطأ في الأبعاد: {e}")
+        return 1280, 720
 
 async def get_intelligent_scale_filter_async(file_path, output_w=720, output_h=1280):
-    """
-    معالجة ذكية للحواف:
-    - الفيديوهات العمودية (9:16) بدون حواف جانبية
-    - الفيديوهات الأفقية بحواف سوداء فقط أعلى وأسفل
-    """
+    """فلتر ذكي بسيط وموثوق"""
     input_w, input_h = await get_video_dimensions_async(file_path)
-    input_aspect = input_w / input_h if input_h > 0 else 1.0
     
-    # إذا كان الفيديو عمودياً (قريب من 9:16)
-    if 0.5 < input_aspect < 0.7:
-        # فيديو عمودي - لا نضيف حواف جانبية
-        return f"setsar=1,scale={output_w}:{output_h}:force_original_aspect_ratio=decrease,pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black,setdar=9/16,fps=30"
+    # حساب نسبة العرض
+    input_aspect = input_w / input_h if input_h > 0 else 1.0
+    output_aspect = output_w / output_h  # 0.5625
+    
+    # التحقق من ما إذا كان عموديًا (9:16 ≈ 0.5625)
+    is_vertical = 0.5 < input_aspect < 0.65
+    
+    if is_vertical:
+        # فيديو عمودي - لا حواف جانبية
+        return f"scale={output_w}:min(iw\\*{output_h}/ih\\,{output_h}),pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
     else:
-        # فيديو أفقي أو مربع - أضف حواف فقط أعلى وأسفل
-        intermediate_h = int(output_w / input_aspect)
-        return f"setsar=1,scale={output_w}:{intermediate_h}:force_original_aspect_ratio=decrease,pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black,setdar=9/16,fps=30"
+        # فيديو أفقي - حواف أعلى وأسفل فقط
+        return f"scale=min(iw\\,{output_w}):min(ih\\*{output_w}/iw\\,{output_h}),pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
 
 async def check_streams_async(file_path):
     cmd = [FFMPEG, "-nostdin", "-i", file_path]
@@ -89,9 +98,14 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         pattern = re.compile(r"out_time_ms=(\d+)")
         
         while True:
-            line = await proc.stdout.readline()
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=2)
+            except asyncio.TimeoutError:
+                break
+            
             if not line:
                 break
+                
             line_str = line.decode("utf-8", errors="ignore").strip()
             match = pattern.search(line_str)
             
@@ -104,17 +118,17 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
                 bar = "█" * filled + "░" * (10 - filled)
                 
                 now = time.time()
-                if now - last_update >= 3:
+                if now - last_update >= 2:
                     last_update = now
                     try:
                         await msg.edit_text(f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
-                    except Exception:
+                    except:
                         pass
                         
         await proc.wait()
         return proc.returncode
 
-# 2. Process media
+# 2. معالجة الوسائط
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -136,22 +150,19 @@ async def process_media(client, message):
 
     async with USER_LOCKS[user]:
         try:
-            await msg.edit_text("📥 **Downloading media from Telegram...**")
-            
+            await msg.edit_text("📥 **Downloading media...**")
             dl_path = await message.download(file_name=dl_name)
             
             if not dl_path or not os.path.exists(dl_path):
-                await msg.edit_text("❌ **Download failed: File not found.**")
+                await msg.edit_text("❌ **Download failed**")
                 return
 
             duration = await get_duration_async(dl_path)
-            if duration == 0:
-                duration = 3.0
-                
-            W, H = 720, 1280
+            if duration == 0: duration = 3.0
 
+            W, H = 720, 1280
             scale_filter = await get_intelligent_scale_filter_async(dl_path, W, H)
-                
+            
             if message.photo:
                 cmd = [
                     FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
@@ -159,9 +170,8 @@ async def process_media(client, message):
                     "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                    "-max_muxing_queue_size", "1024",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "128k",
                     "-shortest", out_path
                 ]
             else:
@@ -173,9 +183,8 @@ async def process_media(client, message):
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "0:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-max_muxing_queue_size", "1024",
-                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "128k",
                         out_path
                     ]
                 elif has_v and not has_a:
@@ -185,9 +194,8 @@ async def process_media(client, message):
                         "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-max_muxing_queue_size", "1024",
-                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "128k",
                         "-shortest", out_path
                     ]
                 elif not has_v and has_a:
@@ -196,54 +204,51 @@ async def process_media(client, message):
                         "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r=30",
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", "setdar=9/16",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-max_muxing_queue_size", "1024",
-                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "128k",
                         "-shortest", out_path
                     ]
                 else:
-                    await msg.edit_text("❌ **الملف غير مدعوم أو لا يحتوي على مسار فيديو/صوت صالح.**")
+                    await msg.edit_text("❌ **File format not supported**")
                     return
 
-            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
+            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing...**", log_file)
             
             if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 USER_FILES[user].append(out_path)
-                await msg.edit_text(f"✅ **Media Added Successfully!**\n📋 **List Count: ({len(USER_FILES[user])})**\n\n• Send /show to view\n• Send /merge to merge\n• Send /clear to clear")
+                await msg.edit_text(f"✅ **Added Successfully!**\n📋 **Count: ({len(USER_FILES[user])})**")
             else:
-                err_msg = f"❌ **Error processing this file. (Exit Code: {returncode})**"
-                await msg.edit_text(err_msg)
+                await msg.edit_text(f"❌ **Processing failed (Code: {returncode})**")
                 
         except Exception as e:
             try: 
-                await msg.edit_text(f"❌ **Download or processing failed.**\n`{e}`")
-            except MessageNotModified: 
+                await msg.edit_text(f"❌ **Error:** `{str(e)[:80]}`")
+            except: 
                 pass
         finally:
-            if dl_path and isinstance(dl_path, str) and os.path.exists(dl_path):
+            if dl_path and os.path.exists(dl_path):
                 try: os.remove(dl_path)
-                except Exception: pass
+                except: pass
             if os.path.exists(log_file):
                 try: os.remove(log_file)
-                except Exception: pass
+                except: pass
 
-# 3. Merge Output
+# 3. دمج الملفات
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
     
     if user in PROCESSING_USERS:
-        return await message.reply_text("⏳ **Merge is already in progress, please wait...**")
+        return await message.reply_text("⏳ **Merge in progress...**")
         
     files = USER_FILES.get(user, [])
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
         USER_FILES[user] = [] 
-        return await message.reply_text("❌ **Need at least 2 files to merge!**")
+        return await message.reply_text("❌ **Need at least 2 files!**")
         
     PROCESSING_USERS.add(user)
-    msg = await message.reply_text("⏳ **Starting lightning fast merge...**")
+    msg = await message.reply_text("⏳ **Starting merge...**")
     list_txt = f"list_{user}.txt"
     out_merge = f"final_{user}.mp4"
     thumb_path = f"thumb_{user}.jpg"
@@ -267,10 +272,10 @@ async def merge_media(client, message):
             out_merge
         ]
         
-        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging Clips instantly...**", log_file)
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **Merging...**", log_file)
         
         if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
-            await msg.edit_text("📤 **Merge Complete! Uploading...**")
+            await msg.edit_text("📤 **Uploading...**")
             
             thumb_cmd = [
                 FFMPEG, "-y", "-nostdin",
@@ -286,26 +291,24 @@ async def merge_media(client, message):
                     thumb=open(thumb_path, "rb") if os.path.exists(thumb_path) else None
                 )
             
-            await msg.edit_text("✅ **Upload Complete!**\n\n• Send /clear to clear files\n• Send /merge to merge more")
+            await msg.edit_text("✅ **Complete!**")
         else:
-            await msg.edit_text(f"❌ **Merge failed. (Exit Code: {returncode})**")
+            await msg.edit_text(f"❌ **Merge failed (Code: {returncode})**")
             
     except Exception as e:
         try:
-            await msg.edit_text(f"❌ **Merge failed.**\n`{str(e)[:100]}`")
-        except MessageNotModified:
+            await msg.edit_text(f"❌ **Error:** `{str(e)[:80]}`")
+        except:
             pass
     finally:
         PROCESSING_USERS.discard(user)
         for f in [list_txt, out_merge, thumb_path, log_file]:
             if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+                try: os.remove(f)
+                except: pass
         USER_FILES[user] = []
 
-# 4. Show Files
+# 4. عرض الملفات
 @app.on_message(filters.private & filters.command("show"))
 async def show_files(client, message):
     user = message.from_user.id
@@ -313,16 +316,16 @@ async def show_files(client, message):
     valid = [f for f in files if os.path.exists(f)]
     
     if not valid:
-        return await message.reply_text("❌ **No files in queue.**")
+        return await message.reply_text("❌ **No files**")
     
-    text = f"📋 **Files in Queue: ({len(valid)})**\n\n"
+    text = f"📋 **Files: ({len(valid)})**\n\n"
     for i, f in enumerate(valid, 1):
         size_mb = os.path.getsize(f) / 1024 / 1024
         text += f"{i}. `{os.path.basename(f)}` - {size_mb:.2f} MB\n"
     
     await message.reply_text(text)
 
-# 5. Clear Files
+# 5. مسح الملفات
 @app.on_message(filters.private & filters.command(["clear", "مسح"]))
 async def clear_files(client, message):
     user = message.from_user.id
@@ -332,30 +335,29 @@ async def clear_files(client, message):
         if os.path.exists(f):
             try:
                 os.remove(f)
-            except Exception:
+            except:
                 pass
     
     USER_FILES[user] = []
-    await message.reply_text("✅ **All files cleared!**")
+    await message.reply_text("✅ **Files cleared!**")
 
-# 6. Help Command
+# 6. أمر البداية
 @app.on_message(filters.private & filters.command("start"))
 async def start_command(client, message):
     await message.reply_text(
         "🎬 **Video Merger Bot**\n\n"
         "**Commands:**\n"
-        "• Send videos/photos/audio/voice\n"
-        "• `/show` - Show queued files\n"
-        "• `/merge` - Merge all files\n"
-        "• `/clear` - Clear all files\n\n"
+        "• Send videos/photos/audio\n"
+        "• `/show` - Show files\n"
+        "• `/merge` - Merge all\n"
+        "• `/clear` - Clear all\n\n"
         "**Features:**\n"
-        "✅ Smart aspect ratio handling\n"
-        "✅ 720x1280 (9:16) Output\n"
-        "✅ Fast encoding (ultrafast)\n"
-        "✅ Progress tracking\n"
-        "✅ Per-user queue protection"
+        "✅ Smart aspect ratio (9:16)\n"
+        "✅ Fast encoding\n"
+        "✅ Progress bar\n"
+        "✅ Auto cleanup"
     )
 
-# 7. Run Bot
+# 7. تشغيل البوت
 if __name__ == "__main__":
     app.run()
