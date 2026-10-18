@@ -55,19 +55,30 @@ async def get_video_dimensions_async(file_path):
         return 1280, 720
 
 async def get_intelligent_scale_filter_async(file_path, output_w=720, output_h=1280):
-    """فلتر ذكي بسيط وموثوق"""
+    """فلتر ذكي محسّن - بدون حواف جانبية للعمودي"""
     input_w, input_h = await get_video_dimensions_async(file_path)
     
-    # حساب نسبة العرض
     input_aspect = input_w / input_h if input_h > 0 else 1.0
     output_aspect = output_w / output_h  # 0.5625
     
-    # التحقق من ما إذا كان عموديًا (9:16 ≈ 0.5625)
-    is_vertical = 0.5 < input_aspect < 0.65
+    # فحص دقيق: هل الفيديو عمودي؟
+    is_vertical = input_aspect < 0.65  # أقل من تقريباً 9:16
     
     if is_vertical:
-        # فيديو عمودي - لا حواف جانبية
-        return f"scale={output_w}:min(iw\\*{output_h}/ih\\,{output_h}),pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
+        # فيديو عمودي: لا حواف جانبية، فقط ملء الارتفاع
+        scale_filter = (
+            f"scale={output_w}:-1,"
+            f"crop={output_w}:{output_h}:(in_w-out_w)/2:0"
+        )
+    else:
+        # فيديو أفقي: حواف أعلى وأسفل فقط
+        scale_filter = (
+            f"scale=-1:{output_h},"
+            f"pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
+        )
+    
+    return scale_filter
+
     else:
         # فيديو أفقي - حواف أعلى وأسفل فقط
         return f"scale=min(iw\\,{output_w}):min(ih\\*{output_w}/iw\\,{output_h}),pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
