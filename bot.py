@@ -33,7 +33,7 @@ async def get_duration_async(file_path):
     return 3.0
 
 async def get_video_dimensions_async(file_path):
-    """استخراج أبعاد الفيديو - مبسط وموثوق"""
+    """استخراج أبعاد الفيديو"""
     try:
         cmd = [FFMPEG, "-nostdin", "-i", file_path]
         proc = await asyncio.create_subprocess_exec(
@@ -41,18 +41,26 @@ async def get_video_dimensions_async(file_path):
         )
         _, stderr = await proc.communicate()
         stderr_str = stderr.decode('utf-8', errors='ignore')
-        
-        # البحث عن دقة الفيديو
         match = re.search(r"(\d{2,5})\s*x\s*(\d{2,5})", stderr_str)
         if match:
             w, h = int(match.group(1)), int(match.group(2))
-            # تحقق من أن الأبعاد معقولة
             if 100 <= w <= 4000 and 100 <= h <= 4000:
                 return w, h
         return 1280, 720
-    except Exception as e:
-        print(f"❌ خطأ في الأبعاد: {e}")
+    except:
         return 1280, 720
+
+
+async def get_intelligent_scale_filter_async(file_path, output_w=720, output_h=1280):
+    """فلتر ذكي - بدون حواف جانبية"""
+    input_w, input_h = await get_video_dimensions_async(file_path)
+    input_aspect = input_w / input_h if input_h > 0 else 1.0
+    is_vertical = input_aspect < 0.65
+    
+    if is_vertical:
+        return "scale=720:-1,crop=720:1280:(in_w-out_w)/2:0"
+    else:
+        return "scale=-1:1280,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"
 
 async def get_intelligent_scale_filter_async(file_path, output_w=720, output_h=1280):
     """فلتر ذكي محسّن - بدون حواف جانبية للعمودي"""
