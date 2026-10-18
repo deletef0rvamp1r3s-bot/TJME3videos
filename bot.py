@@ -59,22 +59,17 @@ async def get_intelligent_scale_filter_async(file_path, output_w=720, output_h=1
     input_w, input_h = await get_video_dimensions_async(file_path)
     
     input_aspect = input_w / input_h if input_h > 0 else 1.0
-    output_aspect = output_w / output_h  # 0.5625
     
     # فحص دقيق: هل الفيديو عمودي؟
-    is_vertical = input_aspect < 0.65  # أقل من تقريباً 9:16
+    is_vertical = input_aspect < 0.65
     
     if is_vertical:
-        # فيديو عمودي: لا حواف جانبية، فقط ملء الارتفاع
-        scale_filter = (
-            f"scale={output_w}:-1,"
-            f"crop={output_w}:{output_h}:(in_w-out_w)/2:0"
-        )
+        # فيديو عمودي: بدون حواف جانبية
+        return f"scale={output_w}:-1,crop={output_w}:{output_h}:(in_w-out_w)/2:0"
     else:
         # فيديو أفقي: حواف أعلى وأسفل فقط
-        scale_filter = (
-            f"scale=-1:{output_h},"
-            f"pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
+        return f"scale=-1:{output_h},pad={output_w}:{output_h}:(ow-iw)/2:(oh-ih)/2:black"
+
         )
     
     return scale_filter
