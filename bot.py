@@ -273,85 +273,89 @@ async def merge_media(client, message):
             await msg.edit_text("📤 **Merge Complete! Uploading...**")
             
             thumb_cmd = [
-                FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
-                "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2:black", 
-                thumb_path
+                FFMPEG, "-y", "-nostdin",
+                "-ss", "0", "-i", out_merge,
+                "-vframes", "1", "-vf", "scale=320:568", thumb_path
             ]
             await run_cmd_async(thumb_cmd)
             
-            final_duration = await get_duration_async(out_merge)
+            with open(out_merge, "rb") as f:
+                await message.reply_video(
+                    f,
+                    caption="✅ **Merged Successfully!** 🎬",
+                    thumb=open(thumb_path, "rb") if os.path.exists(thumb_path) else None
+                )
             
-            try:
-                kwargs = {
-                    "chat_id": user,
-                    "video": out_merge,
-                    "caption": "✅ **Here is your merged video!**",
-                    "duration": int(final_duration),
-                    "width": 720,
-                    "height": 1280
-                }
-                if os.path.exists(thumb_path):
-                    kwargs["thumb"] = thumb_path
-
-                await client.send_video(**kwargs, supports_streaming=True)
-                
-                for path in valid_files:
-                    if os.path.exists(path): 
-                        try: os.remove(path)
-                        except Exception: pass
-                
-                USER_FILES[user] = []
-                await msg.delete()
-                
-            except Exception as e:
-                await msg.edit_text(f"❌ **Upload failed.**\nError: `{e}`")
+            await msg.edit_text("✅ **Upload Complete!**\n\n• Send /clear to clear files\n• Send /merge to merge more")
         else:
-            err_msg = f"❌ **Final merge failed. (Exit Code: {returncode})**"
-            await msg.edit_text(err_msg)
+            await msg.edit_text(f"❌ **Merge failed. (Exit Code: {returncode})**")
             
-        except Exception as e:
-        try: 
-            await msg.edit_text(f"❌ **An unexpected error occurred during merge:**\n`{e}`")
-        except MessageNotModified: 
+    except Exception as e:
+        try:
+            await msg.edit_text(f"❌ **Merge failed.**\n`{str(e)[:100]}`")
+        except MessageNotModified:
             pass
     finally:
-        if os.path.exists(list_txt):
-            try: os.remove(list_txt)
-            except Exception: pass
-        if os.path.exists(out_merge):
-            try: os.remove(out_merge)
-            except Exception: pass
-        if os.path.exists(thumb_path):
-            try: os.remove(thumb_path)
-            except Exception: pass
-        if os.path.exists(log_file):
-            try: os.remove(log_file)
-            except Exception: pass
         PROCESSING_USERS.discard(user)
+        for f in [list_txt, out_merge, thumb_path, log_file]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        USER_FILES[user] = []
 
-@app.on_message(filters.private & filters.command(["show", "عرض"]))
-async def show_media(client, message):
+# 4. Show Files
+@app.on_message(filters.private & filters.command("show"))
+async def show_files(client, message):
     user = message.from_user.id
     files = USER_FILES.get(user, [])
-    valid_files = [f for f in files if os.path.exists(f)]
-    count = len(valid_files)
+    valid = [f for f in files if os.path.exists(f)]
     
-    if count == 0:
-        USER_FILES[user] = []
-        await message.reply_text("📭 **Your list is currently empty.**")
-    else:
-        await message.reply_text(f"📋 **Current List Status:**\n• **Clips Ready:** **({count})**\n\n• Send /merge to merge\n• Send /clear to clear")
+    if not valid:
+        return await message.reply_text("❌ **No files in queue.**")
+    
+    text = f"📋 **Files in Queue: ({len(valid)})**\n\n"
+    for i, f in enumerate(valid, 1):
+        size_mb = os.path.getsize(f) / 1024 / 1024
+        text += f"{i}. `{os.path.basename(f)}` - {size_mb:.2f} MB\n"
+    
+    await message.reply_text(text)
 
+# 5. Clear Files
 @app.on_message(filters.private & filters.command(["clear", "مسح"]))
-async def clear_media(client, message):
+async def clear_files(client, message):
     user = message.from_user.id
-    for path in USER_FILES.get(user, []):
-        if os.path.exists(path): 
-            try: os.remove(path)
-            except Exception: pass
+    files = USER_FILES.get(user, [])
+    
+    for f in files:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    
     USER_FILES[user] = []
-    await message.reply_text("🗑️ **List cleared and memory freed successfully.**")
+    await message.reply_text("✅ **All files cleared!**")
 
+# 6. Help Command
+@app.on_message(filters.private & filters.command("start"))
+async def start_command(client, message):
+    await message.reply_text(
+        "🎬 **Video Merger Bot**\n\n"
+        "**Commands:**\n"
+        "• Send videos/photos/audio/voice\n"
+        "• `/show` - Show queued files\n"
+        "• `/merge` - Merge all files\n"
+        "• `/clear` - Clear all files\n\n"
+        "**Features:**\n"
+        "✅ Smart aspect ratio handling\n"
+        "✅ 720x1280 (9:16) Output\n"
+        "✅ Fast encoding (ultrafast)\n"
+        "✅ Progress tracking\n"
+        "✅ Per-user queue protection"
+    )
+
+# 7. Run Bot
 if __name__ == "__main__":
-    print("🤖 Bot is running smoothly on Railway...")
     app.run()
