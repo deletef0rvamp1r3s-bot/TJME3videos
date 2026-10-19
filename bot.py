@@ -15,9 +15,42 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 app = Client("railway_optimal_merger", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
-USER_FILES = defaultdict(list)
+# ✅ بنية جديدة للـ USER_FILES مع timestamp
+USER_FILES = defaultdict(lambda: {"files": [], "timestamp": time.time()})
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
+
+# ✅ دالة تنظيف الملفات القديمة (أكثر من 30 دقيقة)
+async def cleanup_old_files():
+    """حذف الملفات والبيانات للمستخدمين غير النشطين"""
+    while True:
+        try:
+            await asyncio.sleep(600)  # كل 10 دقائق
+            current_time = time.time()
+            users_to_delete = []
+            
+            for user_id, data in USER_FILES.items():
+                # إذا المستخدم ما استخدم البوت لمدة 30 دقيقة
+                if current_time - data["timestamp"] > 1800:
+                    for file_path in data["files"]:
+                        if os.path.exists(file_path):
+                            try:
+                                os.remove(file_path)
+                            except Exception:
+                                pass
+                    users_to_delete.append(user_id)
+            
+            for user_id in users_to_delete:
+                del USER_FILES[user_id]
+                print(f"🗑️ تنظيف بيانات المستخدم {user_id}")
+                
+        except Exception as e:
+            print(f"❌ خطأ في التنظيف التلقائي: {e}")
+
+# ✅ تحديث timestamp
+def update_user_timestamp(user_id):
+    """تحديث آخر نشاط للمستخدم"""
+    USER_FILES[user_id]["timestamp"] = time.time()
 
 async def detect_dimensions(file_path):
     """اكتشف الأبعاد الفعلية للفيديو"""
@@ -43,7 +76,7 @@ async def get_smart_filter(file_path):
     # 16:9 أفقي (aspect > 1.4)
     elif aspect > 1.4:
         return f"scale=-1:1280,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black"
-    # 4:3 أو ربع (Square-ish)
+    # 4:3 أو مربع (Square-ish)
     else:
         return f"scale=720:-1,pad=720:1280:0:(oh-ih)/2:black"
 
@@ -111,10 +144,11 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         await proc.wait()
         return proc.returncode
 
-# 2. Process media
-@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice | filters.animation))
+# 2. معالج الفيديوهات والصور والملفات الصوتية
+@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
     
     ext = ".mp4"
     if message.video and message.video.file_name:
@@ -123,13 +157,11 @@ async def process_media(client, message):
     elif message.document and message.document.file_name:
         _, e = os.path.splitext(message.document.file_name)
         if e: ext = e
-    elif message.animation and message.animation.file_name:
-        _, e = os.path.splitext(message.animation.file_name)
-        if e: ext = e
 
     dl_name = f"dl_{message.id}_{user}{ext}"
     out_path = f"vid_{message.id}_{user}.mp4"
     log_file = f"ffmpeg_err_{message.id}_{user}.log"
+    dl_path = None
 
     msg = await message.reply_text("⏳ **Queued for processing...**")
 
@@ -148,47 +180,20 @@ async def process_media(client, message):
                 duration = 3.0
             
             smart_filter = await get_smart_filter(dl_path)
-            scale_filter = f"{smart_filter},setdar=9/16,fps=30"
+            scale_filter = f"{smart_filter},setdar=9/16,fps=60"  # ✅ 60 فريم
                 
             if message.photo:
                 cmd = [
                     FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                    "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
+                    "-loop", "1", "-framerate", "60", "-t", "3", "-i", dl_path,  # ✅ 60
                     "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
                     "-max_muxing_queue_size", "1024",
                     "-c:a", "aac", "-ar", "44100", "-ac", "2", 
                     "-shortest", out_path
                 ]
-            elif message.animation:
-                has_v, has_a = await check_streams_async(dl_path)
-                
-                if has_v and not has_a:
-                    cmd = [
-                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                        "-i", dl_path,
-                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                        "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-max_muxing_queue_size", "1024",
-                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                        "-shortest", out_path
-                    ]
-                else:
-                    cmd = [
-                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                        "-i", dl_path,
-                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                        "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
-                        "-max_muxing_queue_size", "1024",
-                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                        "-shortest", out_path
-                    ]
             else:
                 has_v, has_a = await check_streams_async(dl_path)
                 
@@ -198,7 +203,7 @@ async def process_media(client, message):
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "0:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
                         "-max_muxing_queue_size", "1024",
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         out_path
@@ -210,7 +215,7 @@ async def process_media(client, message):
                         "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
                         "-max_muxing_queue_size", "1024",
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         "-shortest", out_path
@@ -218,11 +223,11 @@ async def process_media(client, message):
                 elif not has_v and has_a:
                     cmd = [
                         FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                        "-f", "lavfi", "-i", f"color=c=black:s=720x1280:r=60",  # ✅ 60
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", "setdar=9/16",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-vf", "setdar=9/16,fps=60",  # ✅ 60
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
                         "-max_muxing_queue_size", "1024",
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         "-shortest", out_path
@@ -234,8 +239,8 @@ async def process_media(client, message):
             returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
             
             if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                USER_FILES[user].append(out_path)
-                await msg.edit_text(f"✅ **تم إضافة المقطع!**\n📋 **القائمة: ({len(USER_FILES[user])})**\n\n• /show لعرض\n• /merge للدمج\n• /clear لحذف")
+                USER_FILES[user]["files"].append(out_path)  # ✅ تعديل البنية
+                await msg.edit_text(f"✅ **تم إضافة المقطع!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض\n• /merge للدمج\n• /clear لحذف")
             else:
                 await msg.edit_text(f"❌ **خطأ في المعالجة. Exit Code: {returncode}**")
                 
@@ -252,18 +257,81 @@ async def process_media(client, message):
                 try: os.remove(log_file)
                 except Exception: pass
 
+# ✅ معالج جديد للـ GIFs (Animations)
+@app.on_message(filters.private & filters.animation)
+async def process_gif(client, message):
+    user = message.from_user.id
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
+    
+    dl_name = f"gif_{message.id}_{user}.gif"
+    out_path = f"vid_{message.id}_{user}.mp4"
+    log_file = f"ffmpeg_gif_err_{message.id}_{user}.log"
+    dl_path = None
+
+    msg = await message.reply_text("⏳ **جاري معالجة الـ GIF...**")
+
+    async with USER_LOCKS[user]:
+        try:
+            await msg.edit_text("📥 **جاري التحميل...**")
+            
+            dl_path = await message.download(file_name=dl_name)
+            
+            if not dl_path or not os.path.exists(dl_path):
+                await msg.edit_text("❌ **فشل التحميل.**")
+                return
+
+            duration = await get_duration_async(dl_path)
+            if duration == 0:
+                duration = 3.0
+            
+            # ✅ تطبيق الفلتر الذكي على الـ GIF أيضاً
+            smart_filter = await get_smart_filter(dl_path)
+            scale_filter = f"{smart_filter},setdar=9/16,fps=60"  # ✅ 60 فريم
+            
+            cmd = [
+                FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                "-i", dl_path,
+                "-vf", scale_filter,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
+                "-max_muxing_queue_size", "1024",
+                "-f", "mp4",
+                out_path
+            ]
+            
+            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة الـ GIF...**", log_file)
+            
+            if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                USER_FILES[user]["files"].append(out_path)
+                await msg.edit_text(f"✅ **تم تحويل الـ GIF!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض\n• /merge للدمج\n• /clear لحذف")
+            else:
+                await msg.edit_text(f"❌ **خطأ في تحويل الـ GIF. Exit Code: {returncode}**")
+                
+        except Exception as e:
+            try: 
+                await msg.edit_text(f"❌ **خطأ في معالجة الـ GIF.**")
+            except MessageNotModified: 
+                pass
+        finally:
+            if dl_path and isinstance(dl_path, str) and os.path.exists(dl_path):
+                try: os.remove(dl_path)
+                except Exception: pass
+            if os.path.exists(log_file):
+                try: os.remove(log_file)
+                except Exception: pass
+
 # 3. Merge Output
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
     user = message.from_user.id
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
     
     if user in PROCESSING_USERS:
         return await message.reply_text("⏳ **جاري الدمج، الرجاء الانتظار...**")
         
-    files = USER_FILES.get(user, [])
+    files = USER_FILES.get(user, {}).get("files", [])  # ✅ تعديل البنية
     valid_files = [f for f in files if os.path.exists(f)]
     if len(valid_files) < 2:
-        USER_FILES[user] = [] 
+        USER_FILES[user]["files"] = [] 
         return await message.reply_text("❌ **نحتاج 2 مقطع على الأقل للدمج!**")
         
     PROCESSING_USERS.add(user)
@@ -324,7 +392,7 @@ async def merge_media(client, message):
                         try: os.remove(path)
                         except Exception: pass
                 
-                USER_FILES[user] = []
+                USER_FILES[user]["files"] = []  # ✅ تعديل البنية
                 await msg.delete()
                 
             except Exception as e:
@@ -355,12 +423,14 @@ async def merge_media(client, message):
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
 async def show_media(client, message):
     user = message.from_user.id
-    files = USER_FILES.get(user, [])
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
+    
+    files = USER_FILES.get(user, {}).get("files", [])  # ✅ تعديل البنية
     valid_files = [f for f in files if os.path.exists(f)]
     count = len(valid_files)
     
     if count == 0:
-        USER_FILES[user] = []
+        USER_FILES[user]["files"] = []
         await message.reply_text("📭 **قائمتك فارغة.**")
     else:
         await message.reply_text(f"📋 **القائمة الحالية:**\n• **المقاطع المجهزة:** **({count})**\n\n• /merge للدمج\n• /clear للحذف")
@@ -368,27 +438,39 @@ async def show_media(client, message):
 @app.on_message(filters.private & filters.command(["clear", "مسح"]))
 async def clear_media(client, message):
     user = message.from_user.id
-    for path in USER_FILES.get(user, []):
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
+    
+    for path in USER_FILES.get(user, {}).get("files", []):  # ✅ تعديل البنية
         if os.path.exists(path): 
             try: os.remove(path)
             except Exception: pass
-    USER_FILES[user] = []
+    USER_FILES[user]["files"] = []
     await message.reply_text("🗑️ **تم حذف القائمة وتحرير الذاكرة.**")
 
 @app.on_message(filters.command(["start"]))
 async def start_cmd(client, message):
+    user = message.from_user.id
+    update_user_timestamp(user)  # ✅ تحديث التايمستامب
+    
     await message.reply_text(
         "🎬 **مرحباً بك في دمج الفيديوهات!**\n\n"
         "📤 أرسل لي:\n"
         "• فيديوهات\n"
         "• صور\n"
         "• ملفات صوتية\n"
-        "• مقاطع صوتية\n\n"
+        "• مقاطع صوتية\n"
+        "• GIFs\n\n"
         "📋 **/show** - عرض المقاطع\n"
         "🔗 **/merge** - دمج المقاطع\n"
         "🗑️ **/clear** - حذف المقاطع"
     )
 
-if __name__ == "__main__":
+async def main():
+    """تشغيل البوت والتنظيف التلقائي"""
+    asyncio.create_task(cleanup_old_files())  # ✅ تشغيل التنظيف
+    await app.start()
     print("🤖 البوت يعمل بكفاءة على Railway...")
-    app.run()
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
