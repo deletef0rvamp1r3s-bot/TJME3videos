@@ -112,7 +112,7 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
         return proc.returncode
 
 # 2. Process media
-@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
+@app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice | filters.animation))
 async def process_media(client, message):
     user = message.from_user.id
     
@@ -122,6 +122,9 @@ async def process_media(client, message):
         if e: ext = e
     elif message.document and message.document.file_name:
         _, e = os.path.splitext(message.document.file_name)
+        if e: ext = e
+    elif message.animation and message.animation.file_name:
+        _, e = os.path.splitext(message.animation.file_name)
         if e: ext = e
 
     dl_name = f"dl_{message.id}_{user}{ext}"
@@ -144,10 +147,7 @@ async def process_media(client, message):
             if duration == 0:
                 duration = 3.0
             
-            # الفلتر الذكي يختار بناءً على الأيسبكت الفعلي
             smart_filter = await get_smart_filter(dl_path)
-            
-            # إضافة الـ setdar و fps في النهاية للتأكد
             scale_filter = f"{smart_filter},setdar=9/16,fps=30"
                 
             if message.photo:
@@ -162,6 +162,33 @@ async def process_media(client, message):
                     "-c:a", "aac", "-ar", "44100", "-ac", "2", 
                     "-shortest", out_path
                 ]
+            elif message.animation:
+                has_v, has_a = await check_streams_async(dl_path)
+                
+                if has_v and not has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
+                else:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30", "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
             else:
                 has_v, has_a = await check_streams_async(dl_path)
                 
@@ -191,7 +218,7 @@ async def process_media(client, message):
                 elif not has_v and has_a:
                     cmd = [
                         FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                        "-f", "lavfi", "-i", f"color=c=black:s=720x1280:r=30",
+                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-vf", "setdar=9/16",
