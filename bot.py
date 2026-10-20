@@ -261,7 +261,7 @@ async def process_media(client, message):
 @app.on_message(filters.private & filters.animation)
 async def process_gif(client, message):
     user = message.from_user.id
-    update_user_timestamp(user)  # ✅ تحديث التايمستامب
+    update_user_timestamp(user)
     
     dl_name = f"gif_{message.id}_{user}.gif"
     out_path = f"vid_{message.id}_{user}.mp4"
@@ -284,21 +284,23 @@ async def process_gif(client, message):
             if duration == 0:
                 duration = 3.0
             
-            # ✅ تطبيق الفلتر الذكي على الـ GIF أيضاً
             smart_filter = await get_smart_filter(dl_path)
-            scale_filter = f"{smart_filter},setdar=9/16,fps=60"  # ✅ 60 فريم
+            scale_filter = f"{smart_filter},setdar=9/16,fps=60"
             
             cmd = [
-                FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
-                "-i", dl_path,
+                FFMPEG, "-y", "-nostdin", "-threads", "1",
+                "-loop", "0", "-i", dl_path,
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "60", "-video_track_timescale", "90000",  # ✅ 60
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
+                "-pix_fmt", "yuv420p", "-r", "60",
+                "-video_track_timescale", "90000",
                 "-max_muxing_queue_size", "1024",
+                "-t", str(duration),
                 "-f", "mp4",
                 out_path
             ]
             
-            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة الـ GIF...**", log_file)
+            returncode = await run_cmd_async(cmd)
             
             if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 USER_FILES[user]["files"].append(out_path)
