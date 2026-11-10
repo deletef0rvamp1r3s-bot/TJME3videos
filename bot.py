@@ -69,16 +69,13 @@ async def detect_dimensions(file_path):
 
 
 async def get_smart_filter(file_path):
-    """✅ فلتر آمن ومصحح - لا يسبب أخطاء مع أي أبعاد"""
     W, H = await detect_dimensions(file_path)
     aspect = W / H if H > 0 else 1.0
     print(f"📐 الأبعاد: {W}x{H} | Aspect: {aspect:.2f}", flush=True)
     
     if aspect < 0.65:
-        # عمودي: تكبير ثم قص
         return "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1"
     else:
-        # أفقي أو مربع: تصغير مع حواف سوداء
         return "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
 
 
@@ -166,6 +163,21 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
     return proc.returncode
 
 
+# ✅ إعدادات الجودة الجديدة - سموذ + حجم معقول
+VIDEO_SETTINGS = [
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "20",
+    "-profile:v", "high",
+    "-level", "4.0",
+    "-pix_fmt", "yuv420p",
+    "-r", "30",
+    "-maxrate", "4M",
+    "-bufsize", "8M",
+    "-max_muxing_queue_size", "1024"
+]
+
+
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
     user = message.from_user.id
@@ -205,9 +217,7 @@ async def process_media(client, message):
                     "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                     "-map", "0:v:0", "-map", "1:a:0",
                     "-vf", scale_filter,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                    "-pix_fmt", "yuv420p", "-r", "30",
-                    "-max_muxing_queue_size", "1024",
+                    *VIDEO_SETTINGS,
                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
                     "-shortest", out_path
                 ]
@@ -220,9 +230,7 @@ async def process_media(client, message):
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "0:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                        "-pix_fmt", "yuv420p", "-r", "30",
-                        "-max_muxing_queue_size", "1024",
+                        *VIDEO_SETTINGS,
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         out_path
                     ]
@@ -233,9 +241,7 @@ async def process_media(client, message):
                         "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-vf", scale_filter,
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                        "-pix_fmt", "yuv420p", "-r", "30",
-                        "-max_muxing_queue_size", "1024",
+                        *VIDEO_SETTINGS,
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         "-shortest", out_path
                     ]
@@ -246,9 +252,7 @@ async def process_media(client, message):
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "1:a:0",
                         "-vf", "setdar=9/16,fps=30",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                        "-pix_fmt", "yuv420p", "-r", "30",
-                        "-max_muxing_queue_size", "1024",
+                        *VIDEO_SETTINGS,
                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
                         "-shortest", out_path
                     ]
@@ -294,21 +298,30 @@ async def process_gif(client, message):
                 await msg.edit_text("❌ **فشل التحميل.**")
                 return
 
-            duration = await get_duration_async(dl_path) or 3.0
+            has_v, has_a = await check_streams_async(dl_path)
+            if not has_v:
+                await msg.edit_text("❌ **ملف GIF غير صالح.**")
+                return
+
+            duration = await get_duration_async(dl_path)
+            if duration < 1.0:
+                duration = 3.0
+            
+            print(f"🎞️ GIF Duration: {duration}s", flush=True)
+            
             smart_filter = await get_smart_filter(dl_path)
             scale_filter = f"{smart_filter},setdar=9/16,fps=30"
             
             cmd = [
                 FFMPEG, "-y", "-nostdin",
-                "-loop", "0", "-i", dl_path,
-                "-f", "lavfi", "-t", str(duration), "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-i", dl_path,
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                "-pix_fmt", "yuv420p", "-r", "30",
-                "-max_muxing_queue_size", "1024",
+                *VIDEO_SETTINGS,
                 "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                "-t", str(duration), "-f", "mp4", out_path
+                "-shortest", "-t", str(duration),
+                "-f", "mp4", out_path
             ]
             
             returncode = await run_cmd_async(cmd)
