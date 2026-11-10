@@ -13,17 +13,17 @@ except Exception:
     pass
 
 from pyrogram import Client, filters, idle
-from pyrogram.errors import MessageNotModified
+from pyrogram.errors import MessageNotModified, FloodWait
 
 try:
     import imageio_ffmpeg
 except Exception:
     imageio_ffmpeg = None
 
-# ✅✅✅ المتغيرات من Railway Variables
 API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = str(os.environ.get("API_HASH", "") or "").strip()
 BOT_TOKEN = str(os.environ.get("BOT_TOKEN", "") or "").strip()
+
 
 def get_ffmpeg_path():
     exe = shutil.which("ffmpeg")
@@ -68,23 +68,35 @@ def update_user_timestamp(user_id):
     USER_FILES[user_id]["timestamp"] = time.time()
 
 
+# ✅✅✅ رد آمن: FloodWait = انتظار هادئ ثم إعادة واحدة مدروسة (بدون انهيار)
 async def safe_reply(message, text):
-    try:
-        return await message.reply_text(text)
-    except Exception as e:
-        print("safe_reply error:", e)
-        return None
+    for _ in range(3):
+        try:
+            return await message.reply_text(text)
+        except FloodWait as e:
+            print(f"⏳ FloodWait بالرد: ننتظر {int(e.value)} ثانية")
+            await asyncio.sleep(int(e.value) + 5)
+        except Exception as e:
+            print("safe_reply error:", e)
+            return None
+    return None
 
 
 async def safe_edit(msg, text):
     if not msg:
         return
-    try:
-        await msg.edit_text(text)
-    except MessageNotModified:
-        pass
-    except Exception as e:
-        print("safe_edit error:", e)
+    for _ in range(3):
+        try:
+            await msg.edit_text(text)
+            return
+        except MessageNotModified:
+            return
+        except FloodWait as e:
+            print(f"⏳ FloodWait بالتعديل: ننتظر {int(e.value)} ثانية")
+            await asyncio.sleep(int(e.value) + 5)
+        except Exception as e:
+            print("safe_edit error:", e)
+            return
 
 
 async def safe_delete(msg):
@@ -94,6 +106,34 @@ async def safe_delete(msg):
         await msg.delete()
     except Exception as e:
         print("safe_delete error:", e)
+
+
+# ✅✅✅ تحميل محمي: FloodWait = انتظار ثم إكمال التحميل
+async def download_safe(message, file_name):
+    while True:
+        try:
+            return await message.download(file_name=file_name)
+        except FloodWait as e:
+            wait = int(e.value) + 10
+            print(f"⏳ FloodWait بالتحميل: ننتظر {wait} ثانية")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            print("download_safe error:", e)
+            return None
+
+
+# ✅✅✅ إرسال محمي: FloodWait = انتظار ثم رفع (ما نخسر الشغل أبداً)
+async def send_video_safe(client, **kwargs):
+    while True:
+        try:
+            return await client.send_video(**kwargs)
+        except FloodWait as e:
+            wait = int(e.value) + 10
+            print(f"⏳ FloodWait بالإرسال: ننتظر {wait} ثانية")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            print("send_video_safe error:", e)
+            raise
 
 
 def mime_startswith(message, prefix):
@@ -290,7 +330,7 @@ async def process_media(client, message):
 
             try:
                 await safe_edit(msg, "📥 **جاري التحميل من تليجرام...**")
-                dl_path = await message.download(file_name=dl_name)
+                dl_path = await download_safe(message, dl_name)
 
                 if not dl_path or not os.path.exists(dl_path):
                     await safe_edit(msg, "❌ **فشل التحميل.**")
@@ -449,7 +489,7 @@ async def process_gif(client, message):
 
             try:
                 await safe_edit(msg, "📥 **جاري التحميل...**")
-                dl_path = await message.download(file_name=dl_name)
+                dl_path = await download_safe(message, dl_name)
 
                 if not dl_path or not os.path.exists(dl_path):
                     await safe_edit(msg, "❌ **فشل التحميل.**")
@@ -568,7 +608,8 @@ async def merge_media(client, message):
                     if final_duration <= 0:
                         final_duration = 1.0
 
-                    await client.send_video(
+                    await send_video_safe(
+                        client,
                         chat_id=user,
                         video=out_merge,
                         caption="✅ **فيديوك المدمج جاهز!**",
@@ -697,11 +738,26 @@ async def start_cmd(client, message):
         print("start_cmd error:", e)
 
 
+# ✅✅✅ الدرع الجبار: تسجيل الدخول ما ينهار أبداً على FloodWait
+# ينتظر داخل الحاوية بصمت (بدون أي طلب جديد لتيليجرام) لين يفك الباند، ثم يدخل مرة وحدة
+async def start_with_flood_guard():
+    while True:
+        try:
+            await app.start()
+            print("✅ تم تسجيل الدخول بنجاح")
+            return
+        except FloodWait as e:
+            wait = int(e.value) + 60
+            print(f"⏳ FloodWait: الحاوية تنتظر بصمت {wait} ثانية ({wait // 60} دقيقة) — "
+                  f"لا انهيار، لا إعادة تشغيل، لا محاولات متكررة")
+            await asyncio.sleep(wait)
+
+
 async def main():
     cleanup_task = asyncio.create_task(cleanup_old_files())
 
     try:
-        await app.start()
+        await start_with_flood_guard()
         print("🤖 البوت يعمل الآن...")
         await idle()
     finally:
