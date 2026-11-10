@@ -1,5 +1,3 @@
-شرايك بكودي ذا ؟ بس خليه 30 فريم سموذذ وCRF18 وفيه حمايه من Floodwait؟
-
 import asyncio
 import os
 import re
