@@ -35,8 +35,7 @@ USER_FILES = defaultdict(lambda: {"files": [], "timestamp": time.time()})
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
-# ✅✅✅ مواصفات مطابقة لبوت الحقوق تماماً:
-# CRF 18 + bf0 + level 4.0 + timescale 90000 + 30fps ثابت
+# ✅ مواصفات مطابقة لبوت الحقوق: CRF 18 + bf0 + level 4.0 + timescale 90000 + 30fps
 VIDEO_OPTS = [
     "-c:v", "libx264",
     "-preset", "fast",
@@ -150,17 +149,15 @@ async def get_smart_filter(file_path):
     W, H = await detect_dimensions(file_path)
     aspect = W / H if H > 0 else 1.0
 
-    # ✅ سلسلة جودة متوافقة مع بوت الحقوق:
-    # lanczos (أفضل resize) → denoise زمني خفيف (سموذ بدون تشويش) → sharpen خفيف → 30fps ثابت
     if aspect < 0.65:
         chain = "scale=720:1280:flags=lanczos:force_original_aspect_ratio=increase,crop=720:1280"
     else:
         chain = ("scale=720:1280:flags=lanczos:force_original_aspect_ratio=decrease,"
                  "pad=720:1280:(ow-iw)/2:(oh-ih)/2:black")
     chain += ",setsar=1"
-    chain += ",hqdn3d=2:1:3:3"          # ✅ denoise زمني خفيف = حركة أنعم وأنظف
-    chain += ",unsharp=5:5:0.6:5:5:0.0"  # ✅ وضوح خفيف بدون artifacts
-    chain += ",fps=30"                   # ✅ معدل ثابت = بدون judder
+    chain += ",hqdn3d=2:1:3:3"
+    chain += ",unsharp=5:5:0.6:5:5:0.0"
+    chain += ",fps=30"
     return chain
 
 
@@ -531,7 +528,6 @@ async def merge_media(client, message):
                     except Exception:
                         pass
 
-                # ✅ دمج copy سريع (كل المقاطع بنفس المواصفات الآن)
                 cmd = [
                     FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
                     "-f", "concat", "-safe", "0", "-i", list_txt,
