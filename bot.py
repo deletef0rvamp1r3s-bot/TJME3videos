@@ -166,8 +166,8 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
 # ✅ إعدادات الجودة الجديدة - سموذ + حجم معقول
 VIDEO_SETTINGS = [
     "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-crf", "20",
+    "-preset", "fast",
+    "-crf", "18",
     "-profile:v", "high",
     "-level", "4.0",
     "-pix_fmt", "yuv420p",
