@@ -18,7 +18,8 @@ try:
 except Exception:
     FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
-from pyrogram import Client, filters
+# ✅ تم إضافة idle
+from pyrogram import Client, filters, idle
 from pyrogram.errors import MessageNotModified, FloodWait
 
 API_ID = int(os.environ.get("API_ID", 0))
@@ -393,7 +394,20 @@ async def merge_media(client, message):
 
 
 # ✅✅✅ التشغيل المباشر - الطريقة الوحيدة المضمونة
-if __name__ == "__main__":
+async def main():
     print("🚀 بدء البوت...", flush=True)
+    # بدء تشغيل البوت
+    await app.start()
+    
+    # الآن الـ Loop نشط، يمكننا إنشاء مهمة التنظيف في الخلفية بأمان
     asyncio.create_task(cleanup_old_files())
-    app.run()
+    
+    # إبقاء البوت مستيقظاً ومنع البرنامج من الإنهاء
+    await idle()
+    
+    # إيقاف البوت عند إغلاق التطبيق
+    await app.stop()
+
+if __name__ == "__main__":
+    # asyncio.run سيقوم بإنشاء الـ loop وإدارة دورة الحياة بشكل سليم
+    asyncio.run(main())
