@@ -1,161 +1,97 @@
 import asyncio
 import os
 import re
+import sys
 import time
 import shutil
-import logging
 from collections import defaultdict
 
-logging.basicConfig(level=logging.CRITICAL)
+# ✅ لوغات فورية لـ Railway (بدون buffering)
 try:
-    logging.getLogger("pyrogram").setLevel(logging.CRITICAL)
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     pass
 
-from pyrogram import Client, filters, idle
-from pyrogram.errors import MessageNotModified, FloodWait
-
 try:
     import imageio_ffmpeg
+    FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
-    imageio_ffmpeg = None
+    FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
-API_ID = int(os.environ.get("API_ID", "0") or 0)
-API_HASH = str(os.environ.get("API_HASH", "") or "").strip()
-BOT_TOKEN = str(os.environ.get("BOT_TOKEN", "") or "").strip()
+from pyrogram import Client, filters
+from pyrogram.errors import MessageNotModified, FloodWait
 
+# 1. Bot Setup
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-def get_ffmpeg_path():
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    if imageio_ffmpeg is not None:
-        try:
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
-            pass
-    return "ffmpeg"
-
-
-FFMPEG = get_ffmpeg_path()
-
-app = Client(
-    "colab_video_merger_bot",
-    api_id=API_ID if API_ID else 12345,
-    api_hash=API_HASH if API_HASH else "placeholder",
-    bot_token=BOT_TOKEN if BOT_TOKEN else "123456:placeholder"
-)
+app = Client("railway_optimal_merger", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 USER_FILES = defaultdict(lambda: {"files": [], "timestamp": time.time()})
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
-VIDEO_OPTS = [
-    "-c:v", "libx264",
-    "-preset", "ultrafast",
-    "-crf", "18",
-    "-pix_fmt", "yuv420p",
-    "-r", "60",
-    "-video_track_timescale", "90000",
-    "-max_muxing_queue_size", "1024"
-]
 
-AUDIO_OPTS = ["-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k"]
-SILENT_AUDIO = "anullsrc=channel_layout=stereo:sample_rate=44100"
-
-
-def update_user_timestamp(user_id):
-    USER_FILES[user_id]["timestamp"] = time.time()
-
-
-# ✅✅✅ رد آمن: FloodWait = انتظار هادئ ثم إعادة واحدة مدروسة (بدون انهيار)
-async def safe_reply(message, text):
-    for _ in range(3):
-        try:
-            return await message.reply_text(text)
-        except FloodWait as e:
-            print(f"⏳ FloodWait بالرد: ننتظر {int(e.value)} ثانية")
-            await asyncio.sleep(int(e.value) + 5)
-        except Exception as e:
-            print("safe_reply error:", e)
-            return None
-    return None
-
-
-async def safe_edit(msg, text):
-    if not msg:
-        return
-    for _ in range(3):
-        try:
-            await msg.edit_text(text)
-            return
-        except MessageNotModified:
-            return
-        except FloodWait as e:
-            print(f"⏳ FloodWait بالتعديل: ننتظر {int(e.value)} ثانية")
-            await asyncio.sleep(int(e.value) + 5)
-        except Exception as e:
-            print("safe_edit error:", e)
-            return
-
-
-async def safe_delete(msg):
-    if not msg:
-        return
-    try:
-        await msg.delete()
-    except Exception as e:
-        print("safe_delete error:", e)
-
-
-# ✅✅✅ تحميل محمي: FloodWait = انتظار ثم إكمال التحميل
+# ✅✅✅ درع FloodWait: تحميل
 async def download_safe(message, file_name):
     while True:
         try:
             return await message.download(file_name=file_name)
         except FloodWait as e:
             wait = int(e.value) + 10
-            print(f"⏳ FloodWait بالتحميل: ننتظر {wait} ثانية")
+            print(f"⏳ FloodWait بالتحميل: ننتظر {wait} ثانية", flush=True)
             await asyncio.sleep(wait)
         except Exception as e:
             print("download_safe error:", e)
             return None
 
 
-# ✅✅✅ إرسال محمي: FloodWait = انتظار ثم رفع (ما نخسر الشغل أبداً)
+# ✅✅✅ درع FloodWait: رفع
 async def send_video_safe(client, **kwargs):
     while True:
         try:
             return await client.send_video(**kwargs)
         except FloodWait as e:
             wait = int(e.value) + 10
-            print(f"⏳ FloodWait بالإرسال: ننتظر {wait} ثانية")
+            print(f"⏳ FloodWait بالإرسال: ننتظر {wait} ثانية", flush=True)
             await asyncio.sleep(wait)
         except Exception as e:
             print("send_video_safe error:", e)
             raise
 
 
-def mime_startswith(message, prefix):
-    try:
-        doc = getattr(message, "document", None)
-        if doc and getattr(doc, "mime_type", None):
-            return str(doc.mime_type).startswith(prefix)
-    except Exception:
-        pass
-    return False
+# ✅ درع FloodWait: تسجيل الدخول (عد تنازلي حي، صفر انهيار)
+async def start_with_flood_guard():
+    while True:
+        try:
+            print("🔌 الاتصال بتيليجرام...", flush=True)
+            await app.start()
+            print("✅ تم تسجيل الدخول بنجاح", flush=True)
+            return
+        except FloodWait as e:
+            wait = int(e.value) + 60
+            print(f"⏳ FloodWait: ننتظر {wait} ثانية ({wait // 60} دقيقة) — بدون انهيار", flush=True)
+            while wait > 0:
+                await asyncio.sleep(1)
+                wait -= 1
+                if wait % 10 == 0 or wait <= 5:
+                    print(f"⏳ العد التنازلي: باقي {wait} ثانية", flush=True)
+            print("🔄 انتهت مدة الانتظار — محاولة تسجيل الدخول الآن", flush=True)
 
 
 async def cleanup_old_files():
+    """حذف الملفات والبيانات للمستخدمين غير النشطين"""
     while True:
         try:
             await asyncio.sleep(600)
             current_time = time.time()
             users_to_delete = []
 
-            for user_id, data in list(USER_FILES.items()):
-                if current_time - data.get("timestamp", 0) > 1800:
-                    for file_path in data.get("files", []):
+            for user_id, data in USER_FILES.items():
+                if current_time - data["timestamp"] > 1800:
+                    for file_path in data["files"]:
                         if os.path.exists(file_path):
                             try:
                                 os.remove(file_path)
@@ -164,619 +100,461 @@ async def cleanup_old_files():
                     users_to_delete.append(user_id)
 
             for user_id in users_to_delete:
-                USER_FILES.pop(user_id, None)
-                print(f"🗑️ تنظيف بيانات المستخدم {user_id}")
+                del USER_FILES[user_id]
+                print(f"🗑️ تنظيف بيانات المستخدم {user_id}", flush=True)
 
         except Exception as e:
-            print("cleanup_old_files error:", e)
+            print(f"❌ خطأ في التنظيف التلقائي: {e}")
+
+
+def update_user_timestamp(user_id):
+    USER_FILES[user_id]["timestamp"] = time.time()
 
 
 async def detect_dimensions(file_path):
-    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
-    stderr_str = stderr.decode("utf-8", errors="ignore")
-
-    match = re.search(r"Video:.*?(\d{2,6})x(\d{2,6})", stderr_str)
+    stderr_str = stderr.decode('utf-8', errors='ignore')
+    match = re.search(r"Video:.*?(\d+)x(\d+)", stderr_str)
     if match:
         return int(match.group(1)), int(match.group(2))
-
     return 1280, 720
 
 
 async def get_smart_filter(file_path):
+    """✅ فلتر آمن لكل الأبعاد (بدون انفجار الأفقي)"""
     W, H = await detect_dimensions(file_path)
     aspect = W / H if H > 0 else 1.0
 
     if aspect < 0.65:
         return "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1"
-
     return "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
 
 
 async def get_duration_async(file_path):
-    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
-    stderr_str = stderr.decode("utf-8", errors="ignore")
-
+    stderr_str = stderr.decode('utf-8', errors='ignore')
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr_str)
     if match:
         hours, minutes, seconds = match.groups()
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-
     return 0.0
 
 
 async def check_streams_async(file_path):
-    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
+    cmd = [FFMPEG, "-nostdin", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
-    stderr_str = stderr.decode("utf-8", errors="ignore")
-
+    stderr_str = stderr.decode('utf-8', errors='ignore')
     return "Video:" in stderr_str, "Audio:" in stderr_str
 
 
 async def run_cmd_async(cmd):
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        await proc.wait()
-        return proc.returncode
-    except Exception as e:
-        print("run_cmd_async error:", e)
-        return 1
-
-
-async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**"):
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-    except Exception as e:
-        print("run_cmd_with_progress error:", e)
-        return 1
-
-    last_update = 0
-    pattern = re.compile(r"out_time_ms=(\d+)")
-
-    try:
-        if proc.stdout is not None:
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-
-                line_str = line.decode("utf-8", errors="ignore").strip()
-                match = pattern.search(line_str)
-
-                if match and total_duration and total_duration > 0:
-                    current_sec = int(match.group(1)) / 1_000_000.0
-                    percent = min(100, int((current_sec / total_duration) * 100))
-
-                    filled = int(percent / 10)
-                    bar = "█" * filled + "░" * (10 - filled)
-
-                    now = time.time()
-                    if now - last_update >= 3:
-                        last_update = now
-                        await safe_edit(msg, f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
-    except Exception as e:
-        print("progress loop error:", e)
-
-    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    await proc.communicate()
     return proc.returncode
 
 
+async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**", log_file="ffmpeg_error.log"):
+    with open(log_file, "w", encoding="utf-8") as err_file:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file
+        )
+
+        last_update = 0
+        pattern = re.compile(r"out_time_ms=(\d+)")
+
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            line_str = line.decode("utf-8", errors="ignore").strip()
+            match = pattern.search(line_str)
+
+            if match and total_duration > 0:
+                current_ms = int(match.group(1))
+                current_sec = current_ms / 1000000.0
+                percent = min(100, int((current_sec / total_duration) * 100))
+
+                filled = int(percent / 10)
+                bar = "█" * filled + "░" * (10 - filled)
+
+                now = time.time()
+                if now - last_update >= 3:
+                    last_update = now
+                    try:
+                        await msg.edit_text(f"{header_text}\n\n📊 **Progress: {percent}%**\n`[{bar}]`")
+                    except FloodWait:
+                        pass  # ✅ نتجاهل التحديث بدل ما نعلق الترميز
+                    except Exception:
+                        pass
+
+        await proc.wait()
+        return proc.returncode
+
+
+# 2. معالج الفيديوهات والصور والملفات الصوتية
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
 async def process_media(client, message):
-    try:
-        if not message.from_user:
-            return
+    user = message.from_user.id
+    update_user_timestamp(user)
 
-        user = message.from_user.id
-        update_user_timestamp(user)
+    ext = ".mp4"
+    if message.video and message.video.file_name:
+        _, e = os.path.splitext(message.video.file_name)
+        if e: ext = e
+    elif message.document and message.document.file_name:
+        _, e = os.path.splitext(message.document.file_name)
+        if e: ext = e
 
-        if user in PROCESSING_USERS:
-            await safe_reply(message, "⏳ **جاري عملية أخرى، الرجاء الانتظار...**")
-            return
+    dl_name = f"dl_{message.id}_{user}{ext}"
+    out_path = f"vid_{message.id}_{user}.mp4"
+    log_file = f"ffmpeg_err_{message.id}_{user}.log"
+    dl_path = None
 
-        ext = ".mp4"
+    msg = await message.reply_text("⏳ **Queued for processing...**")
 
-        if message.photo:
-            ext = ".jpg"
-        elif message.voice:
-            ext = ".ogg"
-        elif message.audio:
-            ext = os.path.splitext(message.audio.file_name or "audio.mp3")[1] or ".mp3"
-        elif message.video and message.video.file_name:
-            ext = os.path.splitext(message.video.file_name)[1] or ".mp4"
-        elif message.document and message.document.file_name:
-            ext = os.path.splitext(message.document.file_name)[1] or ".mp4"
+    async with USER_LOCKS[user]:
+        try:
+            await msg.edit_text("📥 **Downloading media from Telegram...**")
 
-        ext = ext or ".mp4"
+            dl_path = await download_safe(message, dl_name)
 
-        dl_name = f"dl_{message.id}_{user}{ext}"
-        out_path = f"vid_{message.id}_{user}.mp4"
-
-        msg = await safe_reply(message, "⏳ **بالانتظار...**")
-        if not msg:
-            return
-
-        async with USER_LOCKS[user]:
-            if user in PROCESSING_USERS:
-                await safe_edit(msg, "⏳ **جاري عملية أخرى، الرجاء الانتظار...**")
+            if not dl_path or not os.path.exists(dl_path):
+                await msg.edit_text("❌ **Download failed: File not found.**")
                 return
 
-            dl_path = None
-            success = False
+            duration = await get_duration_async(dl_path)
+            if duration == 0:
+                duration = 3.0
 
-            try:
-                await safe_edit(msg, "📥 **جاري التحميل من تليجرام...**")
-                dl_path = await download_safe(message, dl_name)
+            smart_filter = await get_smart_filter(dl_path)
+            scale_filter = f"{smart_filter},setdar=9/16,fps=30"  # ✅ 30fps سموذ
 
-                if not dl_path or not os.path.exists(dl_path):
-                    await safe_edit(msg, "❌ **فشل التحميل.**")
+            if message.photo:
+                cmd = [
+                    FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                    "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
+                    "-f", "lavfi", "-t", "3", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-vf", scale_filter,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-r", "30",
+                    "-maxrate", "6M", "-bufsize", "12M",
+                    "-video_track_timescale", "90000",
+                    "-max_muxing_queue_size", "1024",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                    "-shortest", out_path
+                ]
+            else:
+                has_v, has_a = await check_streams_async(dl_path)
+
+                if has_v and has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-map", "0:v:0", "-map", "0:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", "-r", "30",
+                        "-maxrate", "6M", "-bufsize", "12M",
+                        "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        out_path
+                    ]
+                elif has_v and not has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-i", dl_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", scale_filter,
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", "-r", "30",
+                        "-maxrate", "6M", "-bufsize", "12M",
+                        "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
+                elif not has_v and has_a:
+                    cmd = [
+                        FFMPEG, "-y", "-nostdin", "-threads", "1", "-progress", "pipe:1",
+                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                        "-i", dl_path,
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", "setdar=9/16,fps=30",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", "-r", "30",
+                        "-maxrate", "6M", "-bufsize", "12M",
+                        "-video_track_timescale", "90000",
+                        "-max_muxing_queue_size", "1024",
+                        "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                        "-shortest", out_path
+                    ]
+                else:
+                    await msg.edit_text("❌ **الملف غير مدعوم.**")
                     return
 
-                original_duration = await get_duration_async(dl_path)
-                duration = original_duration if original_duration > 0 else 3.0
+            returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **Processing Media...**", log_file)
 
-                smart_filter = await get_smart_filter(dl_path)
-                scale_filter = f"{smart_filter},fps=60"
+            if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                USER_FILES[user]["files"].append(out_path)
+                await msg.edit_text(f"✅ **تم إضافة المقطع!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض\n• /merge للدمج\n• /clear لحذف")
+            else:
+                await msg.edit_text(f"❌ **خطأ في المعالجة. Exit Code: {returncode}**")
 
-                is_audio_msg = bool(message.audio or message.voice or mime_startswith(message, "audio/"))
-                is_image_msg = bool(message.photo or mime_startswith(message, "image/"))
-
-                file_name_lower = ""
-                if message.document and getattr(message.document, "file_name", None):
-                    file_name_lower = str(message.document.file_name).lower()
-
-                is_gif_msg = bool(file_name_lower.endswith(".gif") or mime_startswith(message, "image/gif"))
-
-                if os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except Exception:
-                        pass
-
-                if is_audio_msg:
-                    cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
-                        "-i", dl_path,
-                        "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", "fps=60,setsar=1"
-                    ]
-                    cmd += VIDEO_OPTS + AUDIO_OPTS + ["-t", str(duration), "-shortest", out_path]
-
-                elif is_gif_msg:
-                    cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                        "-i", dl_path,
-                        "-f", "lavfi", "-t", str(duration), "-i", SILENT_AUDIO,
-                        "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", scale_filter
-                    ]
-                    cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
-
-                elif is_image_msg:
-                    cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                        "-loop", "1", "-framerate", "60", "-t", "3", "-i", dl_path,
-                        "-f", "lavfi", "-t", "3", "-i", SILENT_AUDIO,
-                        "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", scale_filter
-                    ]
-                    cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
-
-                else:
-                    has_v, has_a = await check_streams_async(dl_path)
-
-                    if has_v and has_a:
-                        cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                            "-i", dl_path,
-                            "-map", "0:v:0", "-map", "0:a:0",
-                            "-vf", scale_filter
-                        ]
-                        cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
-
-                    elif has_v and not has_a:
-                        cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                            "-i", dl_path,
-                            "-f", "lavfi", "-i", SILENT_AUDIO,
-                            "-map", "0:v:0", "-map", "1:a:0",
-                            "-vf", scale_filter
-                        ]
-                        cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
-
-                    elif not has_v and has_a:
-                        cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                            "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
-                            "-i", dl_path,
-                            "-map", "0:v:0", "-map", "1:a:0",
-                            "-vf", "fps=60,setsar=1"
-                        ]
-                        cmd += VIDEO_OPTS + AUDIO_OPTS + ["-t", str(duration), "-shortest", out_path]
-
-                    else:
-                        await safe_edit(msg, "❌ **الملف غير مدعوم.**")
-                        return
-
-                returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **جاري معالجة الوسائط...**")
-
-                if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                    USER_FILES[user]["files"].append(out_path)
-                    update_user_timestamp(user)
-                    success = True
-                    await safe_edit(
-                        msg,
-                        f"✅ **تم إضافة المقطع!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض المقاطع\n• /merge للدمج\n• /clear للحذف"
-                    )
-                else:
-                    await safe_edit(msg, f"❌ **خطأ في المعالجة. Exit Code: {returncode}**")
-
-            except Exception as e:
-                print("process_media inner error:", e)
-                await safe_edit(msg, "❌ **خطأ في التحميل أو المعالجة.**")
-
-            finally:
-                if dl_path and os.path.exists(dl_path):
-                    try:
-                        os.remove(dl_path)
-                    except Exception:
-                        pass
-
-                if not success and os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except Exception:
-                        pass
-
-    except Exception as e:
-        print("process_media outer error:", e)
+        except Exception as e:
+            try:
+                await msg.edit_text("❌ **خطأ في التحميل أو المعالجة.**")
+            except MessageNotModified:
+                pass
+        finally:
+            if dl_path and isinstance(dl_path, str) and os.path.exists(dl_path):
+                try: os.remove(dl_path)
+                except Exception: pass
+            if os.path.exists(log_file):
+                try: os.remove(log_file)
+                except Exception: pass
 
 
+# ✅ معالج الـ GIFs (مع صوت صامت = دمج سليم)
 @app.on_message(filters.private & filters.animation)
 async def process_gif(client, message):
-    try:
-        if not message.from_user:
-            return
+    user = message.from_user.id
+    update_user_timestamp(user)
 
-        user = message.from_user.id
-        update_user_timestamp(user)
+    dl_name = f"gif_{message.id}_{user}.gif"
+    out_path = f"vid_{message.id}_{user}.mp4"
+    log_file = f"ffmpeg_gif_err_{message.id}_{user}.log"
+    dl_path = None
 
-        if user in PROCESSING_USERS:
-            await safe_reply(message, "⏳ **جاري عملية أخرى، الرجاء الانتظار...**")
-            return
+    msg = await message.reply_text("⏳ **جاري معالجة الـ GIF...**")
 
-        ext = os.path.splitext(message.animation.file_name or "animation.mp4")[1] or ".mp4"
+    async with USER_LOCKS[user]:
+        try:
+            await msg.edit_text("📥 **جاري التحميل...**")
 
-        dl_name = f"anim_{message.id}_{user}{ext}"
-        out_path = f"vid_{message.id}_{user}.mp4"
+            dl_path = await download_safe(message, dl_name)
 
-        msg = await safe_reply(message, "⏳ **جاري تجهيز الـ GIF / Animation...**")
-        if not msg:
-            return
-
-        async with USER_LOCKS[user]:
-            if user in PROCESSING_USERS:
-                await safe_edit(msg, "⏳ **جاري عملية أخرى، الرجاء الانتظار...**")
+            if not dl_path or not os.path.exists(dl_path):
+                await msg.edit_text("❌ **فشل التحميل.**")
                 return
 
-            dl_path = None
-            success = False
+            duration = await get_duration_async(dl_path)
+            if duration == 0:
+                duration = 3.0
 
+            smart_filter = await get_smart_filter(dl_path)
+            scale_filter = f"{smart_filter},setdar=9/16,fps=30"
+
+            cmd = [
+                FFMPEG, "-y", "-nostdin", "-threads", "1",
+                "-loop", "0", "-i", dl_path,
+                "-f", "lavfi", "-t", str(duration), "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-vf", scale_filter,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-r", "30",
+                "-maxrate", "6M", "-bufsize", "12M",
+                "-video_track_timescale", "90000",
+                "-max_muxing_queue_size", "1024",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-t", str(duration),
+                "-f", "mp4",
+                out_path
+            ]
+
+            returncode = await run_cmd_async(cmd)
+
+            if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                USER_FILES[user]["files"].append(out_path)
+                await msg.edit_text(f"✅ **تم تحويل الـ GIF!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض\n• /merge للدمج\n• /clear لحذف")
+            else:
+                await msg.edit_text(f"❌ **خطأ في تحويل الـ GIF. Exit Code: {returncode}**")
+
+        except Exception as e:
             try:
-                await safe_edit(msg, "📥 **جاري التحميل...**")
-                dl_path = await download_safe(message, dl_name)
-
-                if not dl_path or not os.path.exists(dl_path):
-                    await safe_edit(msg, "❌ **فشل التحميل.**")
-                    return
-
-                original_duration = await get_duration_async(dl_path)
-                duration = original_duration if original_duration > 0 else 3.0
-
-                smart_filter = await get_smart_filter(dl_path)
-                scale_filter = f"{smart_filter},fps=60"
-
-                if os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except Exception:
-                        pass
-
-                cmd = [
-                    FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
-                    "-i", dl_path,
-                    "-f", "lavfi", "-t", str(duration), "-i", SILENT_AUDIO,
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    "-vf", scale_filter
-                ]
-                cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
-
-                returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة الـ GIF...**")
-
-                if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                    USER_FILES[user]["files"].append(out_path)
-                    update_user_timestamp(user)
-                    success = True
-                    await safe_edit(
-                        msg,
-                        f"✅ **تم تحويل الـ GIF!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض المقاطع\n• /merge للدمج\n• /clear للحذف"
-                    )
-                else:
-                    await safe_edit(msg, f"❌ **خطأ في تحويل الـ GIF. Exit Code: {returncode}**")
-
-            except Exception as e:
-                print("process_gif inner error:", e)
-                await safe_edit(msg, "❌ **خطأ في معالجة الـ GIF.**")
-
-            finally:
-                if dl_path and os.path.exists(dl_path):
-                    try:
-                        os.remove(dl_path)
-                    except Exception:
-                        pass
-
-                if not success and os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except Exception:
-                        pass
-
-    except Exception as e:
-        print("process_gif outer error:", e)
+                await msg.edit_text("❌ **خطأ في معالجة الـ GIF.**")
+            except MessageNotModified:
+                pass
+        finally:
+            if dl_path and isinstance(dl_path, str) and os.path.exists(dl_path):
+                try: os.remove(dl_path)
+                except Exception: pass
+            if os.path.exists(log_file):
+                try: os.remove(log_file)
+                except Exception: pass
 
 
+# 3. Merge Output
 @app.on_message(filters.private & filters.command(["merge", "دمج"]))
 async def merge_media(client, message):
+    user = message.from_user.id
+    update_user_timestamp(user)
+
+    if user in PROCESSING_USERS:
+        return await message.reply_text("⏳ **جاري الدمج، الرجاء الانتظار...**")
+
+    files = USER_FILES.get(user, {}).get("files", [])
+    valid_files = [f for f in files if os.path.exists(f)]
+    if len(valid_files) < 2:
+        USER_FILES[user]["files"] = []
+        return await message.reply_text("❌ **نحتاج 2 مقطع على الأقل للدمج!**")
+
+    PROCESSING_USERS.add(user)
+    msg = await message.reply_text("⏳ **بدء الدمج الفوري...**")
+    list_txt = f"list_{user}.txt"
+    out_merge = f"final_{user}.mp4"
+    thumb_path = f"thumb_{user}.jpg"
+    log_file = f"ffmpeg_merge_err_{user}.log"
+
     try:
-        if not message.from_user:
-            return
+        total_dur = 0.0
+        with open(list_txt, "w", encoding="utf-8") as f:
+            for path in valid_files:
+                f.write(f"file '{os.path.abspath(path)}'\n")
+                total_dur += await get_duration_async(path)
 
-        user = message.from_user.id
-        update_user_timestamp(user)
+        cmd = [
+            FFMPEG, "-y", "-nostdin",
+            "-progress", "pipe:1",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_txt,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            out_merge
+        ]
 
-        async with USER_LOCKS[user]:
-            if user in PROCESSING_USERS:
-                await safe_reply(message, "⏳ **جاري الدمج، الرجاء الانتظار...**")
-                return
+        returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **جاري الدمج...**", log_file)
 
-            files = USER_FILES.get(user, {}).get("files", [])
-            valid_files = [f for f in files if os.path.exists(f)]
+        if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
+            await msg.edit_text("📤 **انتهى الدمج! جاري الرفع...**")
 
-            if len(valid_files) < 2:
-                USER_FILES[user]["files"] = []
-                await safe_reply(message, "❌ **نحتاج 2 مقطع على الأقل للدمج!**")
-                return
+            thumb_cmd = [
+                FFMPEG, "-y", "-nostdin", "-i", out_merge, "-ss", "00:00:00.500", "-vframes", "1",
+                "-vf", "scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2:black",
+                thumb_path
+            ]
+            await run_cmd_async(thumb_cmd)
 
-            PROCESSING_USERS.add(user)
-            msg = await safe_reply(message, "⏳ **بدء الدمج...**")
-
-            list_txt = f"list_{user}.txt"
-            out_merge = f"final_{user}.mp4"
-            success = False
+            final_duration = await get_duration_async(out_merge)
 
             try:
-                total_dur = 0.0
+                kwargs = {
+                    "chat_id": user,
+                    "video": out_merge,
+                    "caption": "✅ **فيديوك المدمج جاهز!**",
+                    "duration": int(final_duration),
+                    "width": 720,
+                    "height": 1280
+                }
+                if os.path.exists(thumb_path):
+                    kwargs["thumb"] = thumb_path
 
-                with open(list_txt, "w", encoding="utf-8") as f:
-                    for path in valid_files:
-                        f.write(f"file '{os.path.abspath(path)}'\n")
-                        total_dur += await get_duration_async(path)
+                await send_video_safe(client, **kwargs, supports_streaming=True)
 
-                if os.path.exists(out_merge):
-                    try:
-                        os.remove(out_merge)
-                    except Exception:
-                        pass
+                for path in valid_files:
+                    if os.path.exists(path):
+                        try: os.remove(path)
+                        except Exception: pass
 
-                cmd = [
-                    FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
-                    "-f", "concat", "-safe", "0", "-i", list_txt,
-                    "-c", "copy", "-movflags", "+faststart", out_merge
-                ]
-
-                returncode = await run_cmd_with_progress(cmd, total_dur, msg, "🔄 **جاري الدمج...**")
-
-                if returncode == 0 and os.path.exists(out_merge) and os.path.getsize(out_merge) > 0:
-                    await safe_edit(msg, "📤 **انتهى الدمج! جاري الرفع...**")
-
-                    final_duration = await get_duration_async(out_merge)
-                    if final_duration <= 0:
-                        final_duration = 1.0
-
-                    await send_video_safe(
-                        client,
-                        chat_id=user,
-                        video=out_merge,
-                        caption="✅ **فيديوك المدمج جاهز!**",
-                        duration=int(final_duration),
-                        width=720,
-                        height=1280,
-                        supports_streaming=True
-                    )
-
-                    for path in valid_files:
-                        if os.path.exists(path):
-                            try:
-                                os.remove(path)
-                            except Exception:
-                                pass
-
-                    USER_FILES[user]["files"] = []
-                    update_user_timestamp(user)
-                    success = True
-                    await safe_delete(msg)
-
-                else:
-                    await safe_edit(msg, f"❌ **خطأ في الدمج. Exit Code: {returncode}**")
+                USER_FILES[user]["files"] = []
+                await msg.delete()
 
             except Exception as e:
-                print("merge_media inner error:", e)
-                await safe_edit(msg, "❌ **خطأ في الدمج أو الرفع.**")
-
-            finally:
-                PROCESSING_USERS.discard(user)
-
-                if os.path.exists(list_txt):
-                    try:
-                        os.remove(list_txt)
-                    except Exception:
-                        pass
-
-                if os.path.exists(out_merge):
-                    try:
-                        os.remove(out_merge)
-                    except Exception:
-                        pass
+                await msg.edit_text("❌ **خطأ في الرفع.**")
+        else:
+            await msg.edit_text(f"❌ **خطأ في الدمج. Exit Code: {returncode}**")
 
     except Exception as e:
-        print("merge_media outer error:", e)
+        try:
+            await msg.edit_text("❌ **خطأ غير متوقع.**")
+        except MessageNotModified:
+            pass
+    finally:
+        if os.path.exists(list_txt):
+            try: os.remove(list_txt)
+            except Exception: pass
+        if os.path.exists(out_merge):
+            try: os.remove(out_merge)
+            except Exception: pass
+        if os.path.exists(thumb_path):
+            try: os.remove(thumb_path)
+            except Exception: pass
+        if os.path.exists(log_file):
+            try: os.remove(log_file)
+            except Exception: pass
+        PROCESSING_USERS.discard(user)
 
 
 @app.on_message(filters.private & filters.command(["show", "عرض"]))
 async def show_media(client, message):
-    try:
-        if not message.from_user:
-            return
+    user = message.from_user.id
+    update_user_timestamp(user)
 
-        user = message.from_user.id
-        update_user_timestamp(user)
+    files = USER_FILES.get(user, {}).get("files", [])
+    valid_files = [f for f in files if os.path.exists(f)]
+    count = len(valid_files)
 
-        files = USER_FILES.get(user, {}).get("files", [])
-        valid_files = [f for f in files if os.path.exists(f)]
-        USER_FILES[user]["files"] = valid_files
-
-        count = len(valid_files)
-
-        if count == 0:
-            await safe_reply(message, "📭 **قائمتك فارغة.**")
-        else:
-            await safe_reply(
-                message,
-                f"📋 **القائمة الحالية:**\n• **المقاطع المجهزة:** **({count})**\n\n• /merge للدمج\n• /clear للحذف"
-            )
-
-    except Exception as e:
-        print("show_media error:", e)
+    if count == 0:
+        USER_FILES[user]["files"] = []
+        await message.reply_text("📭 **قائمتك فارغة.**")
+    else:
+        await message.reply_text(f"📋 **القائمة الحالية:**\n• **المقاطع المجهزة:** **({count})**\n\n• /merge للدمج\n• /clear للحذف")
 
 
 @app.on_message(filters.private & filters.command(["clear", "مسح"]))
 async def clear_media(client, message):
-    try:
-        if not message.from_user:
-            return
+    user = message.from_user.id
+    update_user_timestamp(user)
 
-        user = message.from_user.id
-        update_user_timestamp(user)
-
-        async with USER_LOCKS[user]:
-            if user in PROCESSING_USERS:
-                await safe_reply(message, "⏳ **لا يمكن الحذف أثناء وجود عملية جارية.**")
-                return
-
-            for path in USER_FILES.get(user, {}).get("files", []):
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-
-            USER_FILES[user]["files"] = []
-            await safe_reply(message, "🗑️ **تم حذف القائمة وتحرير الذاكرة.**")
-
-    except Exception as e:
-        print("clear_media error:", e)
+    for path in USER_FILES.get(user, {}).get("files", []):
+        if os.path.exists(path):
+            try: os.remove(path)
+            except Exception: pass
+    USER_FILES[user]["files"] = []
+    await message.reply_text("🗑️ **تم حذف القائمة وتحرير الذاكرة.**")
 
 
-@app.on_message(filters.private & filters.command(["start"]))
+@app.on_message(filters.command(["start"]))
 async def start_cmd(client, message):
-    try:
-        if not message.from_user:
-            return
+    user = message.from_user.id
+    update_user_timestamp(user)
 
-        update_user_timestamp(message.from_user.id)
-
-        await safe_reply(
-            message,
-            "🎬 **مرحباً بك في دمج الفيديوهات!**\n\n"
-            "📤 أرسل لي:\n"
-            "• فيديوهات\n"
-            "• صور\n"
-            "• ملفات صوتية\n"
-            "• مقاطع صوتية\n"
-            "• GIFs\n\n"
-            "📋 **/show** - عرض المقاطع\n"
-            "🔗 **/merge** - دمج المقاطع\n"
-            "🗑️ **/clear** - حذف المقاطع"
-        )
-
-    except Exception as e:
-        print("start_cmd error:", e)
-
-
-# ✅✅✅ الدرع الجبار: تسجيل الدخول ما ينهار أبداً على FloodWait
-# ينتظر داخل الحاوية بصمت (بدون أي طلب جديد لتيليجرام) لين يفك الباند، ثم يدخل مرة وحدة
-async def start_with_flood_guard():
-    while True:
-        try:
-            await app.start()
-            print("✅ تم تسجيل الدخول بنجاح")
-            return
-        except FloodWait as e:
-            wait = int(e.value) + 60
-            print(f"⏳ FloodWait: الحاوية تنتظر بصمت {wait} ثانية ({wait // 60} دقيقة) — "
-                  f"لا انهيار، لا إعادة تشغيل، لا محاولات متكررة")
-            await asyncio.sleep(wait)
+    await message.reply_text(
+        "🎬 **مرحباً بك في دمج الفيديوهات!**\n\n"
+        "📤 أرسل لي:\n"
+        "• فيديوهات\n"
+        "• صور\n"
+        "• ملفات صوتية\n"
+        "• مقاطع صوتية\n"
+        "• GIFs\n\n"
+        "📋 **/show** - عرض المقاطع\n"
+        "🔗 **/merge** - دمج المقاطع\n"
+        "🗑️ **/clear** - حذف المقاطع"
+    )
 
 
 async def main():
-    cleanup_task = asyncio.create_task(cleanup_old_files())
-
-    try:
-        await start_with_flood_guard()
-        print("🤖 البوت يعمل الآن...")
-        await idle()
-    finally:
-        cleanup_task.cancel()
-
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-        try:
-            await app.stop()
-        except Exception:
-            pass
+    asyncio.create_task(cleanup_old_files())
+    await start_with_flood_guard()
+    print("🤖 البوت يعمل بكفاءة على Railway...", flush=True)
+    await asyncio.Event().wait()
 
 
-if not (API_ID and API_HASH and BOT_TOKEN):
-    raise ValueError("⚠️ ضع API_ID و API_HASH و BOT_TOKEN في متغيرات Railway")
-else:
+if __name__ == "__main__":
     asyncio.run(main())
