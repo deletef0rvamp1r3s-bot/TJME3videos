@@ -6,57 +6,62 @@ import shutil
 import logging
 from collections import defaultdict
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.CRITICAL)
 try:
-    logging.getLogger("pyrogram").setLevel(logging.WARNING)
+    logging.getLogger("pyrogram").setLevel(logging.CRITICAL)
 except Exception:
     pass
 
 from pyrogram import Client, filters, idle
 from pyrogram.errors import MessageNotModified
 
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise ValueError("⚠️ ضع API_ID, API_HASH, BOT_TOKEN بمتغيرات Railway")
+# ✅✅✅ المتغيرات من Railway Variables
+API_ID = int(os.environ.get("API_ID", "0") or 0)
+API_HASH = str(os.environ.get("API_HASH", "") or "").strip()
+BOT_TOKEN = str(os.environ.get("BOT_TOKEN", "") or "").strip()
 
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+def get_ffmpeg_path():
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    if imageio_ffmpeg is not None:
+        try:
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+    return "ffmpeg"
+
+
+FFMPEG = get_ffmpeg_path()
 
 app = Client(
-    "video_merger_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    "colab_video_merger_bot",
+    api_id=API_ID if API_ID else 12345,
+    api_hash=API_HASH if API_HASH else "placeholder",
+    bot_token=BOT_TOKEN if BOT_TOKEN else "123456:placeholder"
 )
 
 USER_FILES = defaultdict(lambda: {"files": [], "timestamp": time.time()})
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
-# ✅ مواصفات مطابقة لبوت الحقوق: CRF 18 + bf0 + level 4.0 + timescale 90000 + 30fps
 VIDEO_OPTS = [
     "-c:v", "libx264",
-    "-preset", "fast",
+    "-preset", "ultrafast",
     "-crf", "18",
     "-pix_fmt", "yuv420p",
-    "-r", "30",
-    "-bf", "0",
-    "-level", "4.0",
-    "-g", "60",
-    "-keyint_min", "30",
-    "-sc_threshold", "0",
-    "-maxrate", "6M",
-    "-bufsize", "12M",
+    "-r", "60",
     "-video_track_timescale", "90000",
-    "-x264-params", "aq-mode=3:aq-strength=0.9:ref=2:me=hex:subme=4:trellis=1:threads=0",
-    "-max_muxing_queue_size", "1024",
-    "-movflags", "+faststart"
+    "-max_muxing_queue_size", "1024"
 ]
 
-AUDIO_OPTS = ["-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "192k"]
-SILENT_AUDIO = "anullsrc=channel_layout=stereo:sample_rate=48000"
+AUDIO_OPTS = ["-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k"]
+SILENT_AUDIO = "anullsrc=channel_layout=stereo:sample_rate=44100"
 
 
 def update_user_timestamp(user_id):
@@ -126,7 +131,7 @@ async def cleanup_old_files():
             print("cleanup_old_files error:", e)
 
 
-async def probe_stderr(file_path):
+async def detect_dimensions(file_path):
     cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -134,14 +139,12 @@ async def probe_stderr(file_path):
         stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await proc.communicate()
-    return stderr.decode("utf-8", errors="ignore")
+    stderr_str = stderr.decode("utf-8", errors="ignore")
 
-
-async def detect_dimensions(file_path):
-    stderr_str = await probe_stderr(file_path)
     match = re.search(r"Video:.*?(\d{2,6})x(\d{2,6})", stderr_str)
     if match:
         return int(match.group(1)), int(match.group(2))
+
     return 1280, 720
 
 
@@ -150,29 +153,54 @@ async def get_smart_filter(file_path):
     aspect = W / H if H > 0 else 1.0
 
     if aspect < 0.65:
-        chain = "scale=720:1280:flags=lanczos:force_original_aspect_ratio=increase,crop=720:1280"
-    else:
-        chain = ("scale=720:1280:flags=lanczos:force_original_aspect_ratio=decrease,"
-                 "pad=720:1280:(ow-iw)/2:(oh-ih)/2:black")
-    chain += ",setsar=1"
-    chain += ",hqdn3d=2:1:3:3"
-    chain += ",unsharp=5:5:0.6:5:5:0.0"
-    chain += ",fps=30"
-    return chain
+        return "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1"
+
+    return "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
 
 
 async def get_duration_async(file_path):
-    stderr_str = await probe_stderr(file_path)
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    stderr_str = stderr.decode("utf-8", errors="ignore")
+
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr_str)
     if match:
         hours, minutes, seconds = match.groups()
         return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+
     return 0.0
 
 
 async def check_streams_async(file_path):
-    stderr_str = await probe_stderr(file_path)
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", file_path]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    stderr_str = stderr.decode("utf-8", errors="ignore")
+
     return "Video:" in stderr_str, "Audio:" in stderr_str
+
+
+async def run_cmd_async(cmd):
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        return proc.returncode
+    except Exception as e:
+        print("run_cmd_async error:", e)
+        return 1
 
 
 async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Processing...**"):
@@ -272,6 +300,7 @@ async def process_media(client, message):
                 duration = original_duration if original_duration > 0 else 3.0
 
                 smart_filter = await get_smart_filter(dl_path)
+                scale_filter = f"{smart_filter},fps=60"
 
                 is_audio_msg = bool(message.audio or message.voice or mime_startswith(message, "audio/"))
                 is_image_msg = bool(message.photo or mime_startswith(message, "image/"))
@@ -290,31 +319,31 @@ async def process_media(client, message):
 
                 if is_audio_msg:
                     cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
-                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
+                        "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                         "-i", dl_path,
                         "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", "fps=30,setsar=1"
+                        "-vf", "fps=60,setsar=1"
                     ]
                     cmd += VIDEO_OPTS + AUDIO_OPTS + ["-t", str(duration), "-shortest", out_path]
 
                 elif is_gif_msg:
                     cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
+                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
                         "-i", dl_path,
                         "-f", "lavfi", "-t", str(duration), "-i", SILENT_AUDIO,
                         "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", smart_filter
+                        "-vf", scale_filter
                     ]
                     cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
 
                 elif is_image_msg:
                     cmd = [
-                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
-                        "-loop", "1", "-framerate", "30", "-t", "3", "-i", dl_path,
+                        FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
+                        "-loop", "1", "-framerate", "60", "-t", "3", "-i", dl_path,
                         "-f", "lavfi", "-t", "3", "-i", SILENT_AUDIO,
                         "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", smart_filter
+                        "-vf", scale_filter
                     ]
                     cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
 
@@ -323,30 +352,30 @@ async def process_media(client, message):
 
                     if has_v and has_a:
                         cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
+                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
                             "-i", dl_path,
                             "-map", "0:v:0", "-map", "0:a:0",
-                            "-vf", smart_filter
+                            "-vf", scale_filter
                         ]
                         cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
 
                     elif has_v and not has_a:
                         cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
+                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
                             "-i", dl_path,
                             "-f", "lavfi", "-i", SILENT_AUDIO,
                             "-map", "0:v:0", "-map", "1:a:0",
-                            "-vf", smart_filter
+                            "-vf", scale_filter
                         ]
                         cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
 
                     elif not has_v and has_a:
                         cmd = [
-                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
-                            "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30",
+                            FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
+                            "-f", "lavfi", "-i", "color=c=black:s=720x1280:r=60",
                             "-i", dl_path,
                             "-map", "0:v:0", "-map", "1:a:0",
-                            "-vf", "fps=30,setsar=1"
+                            "-vf", "fps=60,setsar=1"
                         ]
                         cmd += VIDEO_OPTS + AUDIO_OPTS + ["-t", str(duration), "-shortest", out_path]
 
@@ -354,20 +383,15 @@ async def process_media(client, message):
                         await safe_edit(msg, "❌ **الملف غير مدعوم.**")
                         return
 
-                returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة جودة عالية...**")
+                returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **جاري معالجة الوسائط...**")
 
                 if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                     USER_FILES[user]["files"].append(out_path)
                     update_user_timestamp(user)
                     success = True
-                    size_mb = os.path.getsize(out_path) / (1024 * 1024)
                     await safe_edit(
                         msg,
-                        f"✅ **تم إضافة المقطع!**\n"
-                        f"💾 **الحجم: {size_mb:.1f} MB**\n"
-                        f"🎬 **CRF 18 | 30fps سموذ | متوافق مع بوت الحقوق**\n"
-                        f"📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n"
-                        f"• /show لعرض المقاطع\n• /merge للدمج\n• /clear للحذف"
+                        f"✅ **تم إضافة المقطع!**\n📋 **القائمة: ({len(USER_FILES[user]['files'])})**\n\n• /show لعرض المقاطع\n• /merge للدمج\n• /clear للحذف"
                     )
                 else:
                     await safe_edit(msg, f"❌ **خطأ في المعالجة. Exit Code: {returncode}**")
@@ -435,6 +459,7 @@ async def process_gif(client, message):
                 duration = original_duration if original_duration > 0 else 3.0
 
                 smart_filter = await get_smart_filter(dl_path)
+                scale_filter = f"{smart_filter},fps=60"
 
                 if os.path.exists(out_path):
                     try:
@@ -443,11 +468,11 @@ async def process_gif(client, message):
                         pass
 
                 cmd = [
-                    FFMPEG, "-y", "-nostdin", "-hide_banner", "-progress", "pipe:1",
+                    FFMPEG, "-y", "-nostdin", "-hide_banner", "-threads", "1", "-progress", "pipe:1",
                     "-i", dl_path,
                     "-f", "lavfi", "-t", str(duration), "-i", SILENT_AUDIO,
                     "-map", "0:v:0", "-map", "1:a:0",
-                    "-vf", smart_filter
+                    "-vf", scale_filter
                 ]
                 cmd += VIDEO_OPTS + AUDIO_OPTS + ["-shortest", out_path]
 
@@ -546,7 +571,7 @@ async def merge_media(client, message):
                     await client.send_video(
                         chat_id=user,
                         video=out_merge,
-                        caption="✅ **فيديوك المدمج جاهز!**\n🎬 CRF 18 | 30fps سموذ | جاهز لبوت الحقوق",
+                        caption="✅ **فيديوك المدمج جاهز!**",
                         duration=int(final_duration),
                         width=720,
                         height=1280,
@@ -657,13 +682,12 @@ async def start_cmd(client, message):
         await safe_reply(
             message,
             "🎬 **مرحباً بك في دمج الفيديوهات!**\n\n"
-            "✨ **جودة مطابقة لبوت الحقوق:**\n"
-            "• CRF 18 سينمائي\n"
-            "• 30fps ثابت سموذ (بدون judder)\n"
-            "• Denoise زمني + Lanczos + Sharpening\n"
-            "• حجم معقول (سقف 6M)\n\n"
             "📤 أرسل لي:\n"
-            "• فيديوهات\n• صور\n• ملفات صوتية\n• مقاطع صوتية\n• GIFs\n\n"
+            "• فيديوهات\n"
+            "• صور\n"
+            "• ملفات صوتية\n"
+            "• مقاطع صوتية\n"
+            "• GIFs\n\n"
             "📋 **/show** - عرض المقاطع\n"
             "🔗 **/merge** - دمج المقاطع\n"
             "🗑️ **/clear** - حذف المقاطع"
@@ -678,7 +702,7 @@ async def main():
 
     try:
         await app.start()
-        print("🤖 بوت التجميع شغال على Railway | CRF 18 + 30fps سموذ + متوافق مع بوت الحقوق")
+        print("🤖 البوت يعمل الآن...")
         await idle()
     finally:
         cleanup_task.cancel()
@@ -696,5 +720,7 @@ async def main():
             pass
 
 
-if __name__ == "__main__":
+if not (API_ID and API_HASH and BOT_TOKEN):
+    raise ValueError("⚠️ ضع API_ID و API_HASH و BOT_TOKEN في متغيرات Railway")
+else:
     asyncio.run(main())
