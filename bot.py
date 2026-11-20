@@ -4,6 +4,7 @@ import re
 import time
 import shutil
 import logging
+import urllib.request
 from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
@@ -32,7 +33,6 @@ if not API_ID or not API_HASH or not BOT_TOKEN:
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
-# ✅ جلسة بالذاكرة فقط: صفر ملفات session = صفر فشل صلاحيات عند الإقلاع
 app = Client(
     "merger_bot_session",
     api_id=API_ID,
@@ -128,6 +128,17 @@ def mime_startswith(message, prefix):
     except Exception:
         pass
     return False
+
+
+# ✅✅✅ هاندر التشخيص: أي رسالة خاصة توصل تنطبع باللوق فوراً
+@app.on_message(filters.private, group=-1)
+async def _debug_updates(client, message):
+    try:
+        kind = str(message.media) if message.media else "text"
+        txt = (message.text or message.caption or "")[:40]
+        print(f"📨 وصل تحديث: chat={message.chat.id} نوع={kind} نص={txt}")
+    except Exception:
+        pass
 
 
 async def cleanup_old_files():
@@ -308,7 +319,7 @@ async def process_media(client, message):
             success = False
 
             try:
-                await safe_edit(msg, "📥 **جاري التحميل من تليجرام...**")
+                await safe_edit(msg, "📥 **جاري التحميل من تيليجرام...**")
                 dl_path = await message.download(file_name=dl_name)
 
                 if not dl_path or not os.path.exists(dl_path):
@@ -728,6 +739,15 @@ async def main():
     cleanup_task = asyncio.create_task(cleanup_old_files())
 
     try:
+        # ✅✅✅ مسح أي Webhook قديم = إصلاح الصمت التام
+        try:
+            urllib.request.urlopen(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=false",
+                timeout=20)
+            print("🧹 تم طلب مسح الـ Webhook")
+        except Exception as e:
+            print("⚠️ deleteWebhook:", e)
+
         connected = False
         for attempt in range(1, 6):
             try:
@@ -739,10 +759,13 @@ async def main():
                 print(f"⚠️ محاولة اتصال {attempt}/5 فشلت: {e}")
                 await asyncio.sleep(10 * attempt)
         if not connected:
-            raise SystemExit("❌ فشل الاتصال بتيليجرام بعد 5 محاولات — تحقق من التوكن/API")
+            raise SystemExit("❌ فشل الاتصال بعد 5 محاولات")
 
         me = await app.get_me()
-        print(f"🤖 بوت التجميع شغال باسم @{me.username} | احتفاظ 7 أيام + حارس قرص | قرص: {free_gb():.1f}GB")
+        print("=" * 60)
+        print(f"🤖 بوت التجميع شغال باسم @{me.username}")
+        print(f"🔗 كلم البوت من هذا الرابط بالضبط: https://t.me/{me.username}")
+        print("=" * 60)
         await idle()
     finally:
         cleanup_task.cancel()
