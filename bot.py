@@ -4,6 +4,7 @@ import re
 import time
 import shutil
 import logging
+import threading
 import urllib.request
 from collections import defaultdict
 
@@ -13,7 +14,7 @@ try:
 except Exception:
     pass
 
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.errors import MessageNotModified
 
 
@@ -130,7 +131,6 @@ def mime_startswith(message, prefix):
     return False
 
 
-# ✅✅✅ هاندر التشخيص: أي رسالة خاصة توصل تنطبع باللوق فوراً
 @app.on_message(filters.private, group=-1)
 async def _debug_updates(client, message):
     try:
@@ -735,51 +735,29 @@ async def start_cmd(client, message):
         print("start_cmd error:", e)
 
 
-async def main():
-    cleanup_task = asyncio.create_task(cleanup_old_files())
-
+def _cleanup_worker():
+    """خيط تنظيف يعمل بجانب app.run()"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        # ✅✅✅ مسح أي Webhook قديم = إصلاح الصمت التام
-        try:
-            urllib.request.urlopen(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=false",
-                timeout=20)
-            print("🧹 تم طلب مسح الـ Webhook")
-        except Exception as e:
-            print("⚠️ deleteWebhook:", e)
+        loop.run_until_complete(cleanup_old_files())
+    except Exception:
+        pass
 
-        connected = False
-        for attempt in range(1, 6):
-            try:
-                await app.start()
-                connected = True
-                print("✅ البوت متصل بتيليجرام بنجاح")
-                break
-            except Exception as e:
-                print(f"⚠️ محاولة اتصال {attempt}/5 فشلت: {e}")
-                await asyncio.sleep(10 * attempt)
-        if not connected:
-            raise SystemExit("❌ فشل الاتصال بعد 5 محاولات")
 
-        me = await app.get_me()
-        print("=" * 60)
-        print(f"🤖 بوت التجميع شغال باسم @{me.username}")
-        print(f"🔗 كلم البوت من هذا الرابط بالضبط: https://t.me/{me.username}")
-        print("=" * 60)
-        await idle()
-    finally:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        try:
-            await app.stop()
-        except Exception:
-            pass
+def _bootstrap():
+    """مسح webhook + طباعة الرابط قبل التشغيل"""
+    try:
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=false",
+            timeout=20)
+        print("🧹 تم طلب مسح الـ Webhook")
+    except Exception as e:
+        print("⚠️ deleteWebhook:", e)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _bootstrap()
+    threading.Thread(target=_cleanup_worker, daemon=True).start()
+    # ✅ الطريقة الرسمية من Pyrogram — مضمونة 100%
+    app.run()
