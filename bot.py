@@ -6,7 +6,7 @@ import shutil
 import logging
 from collections import defaultdict
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 try:
     logging.getLogger("pyrogram").setLevel(logging.WARNING)
 except Exception:
@@ -15,27 +15,36 @@ except Exception:
 from pyrogram import Client, filters, idle
 from pyrogram.errors import MessageNotModified
 
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+def _env_int(name, default=0):
+    try:
+        return int(str(os.environ.get(name, "") or default).strip())
+    except Exception:
+        return default
+
+
+API_ID = _env_int("API_ID")
+API_HASH = str(os.environ.get("API_HASH", "") or "").strip()
+BOT_TOKEN = str(os.environ.get("BOT_TOKEN", "") or "").strip()
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise ValueError("⚠️ ضع API_ID, API_HASH, BOT_TOKEN بمتغيرات Railway")
+    raise SystemExit("❌ متغيرات ناقصة: تأكد من API_ID و API_HASH و BOT_TOKEN في Railway")
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
+# ✅ جلسة بالذاكرة فقط: صفر ملفات session = صفر فشل صلاحيات عند الإقلاع
 app = Client(
-    "video_merger_bot",
+    "merger_bot_session",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    in_memory=True,
 )
 
 USER_FILES = defaultdict(lambda: {"files": [], "timestamp": time.time()})
 USER_LOCKS = defaultdict(asyncio.Lock)
 PROCESSING_USERS = set()
 
-# ✅✅✅ الاحتفاظ: 7 أيام (بدل 30 دقيقة) — القائمة تنمسح فقط بـ /merge أو /clear
 RETAIN_SECONDS = 7 * 24 * 3600
 MIN_FREE_GB = 1.0
 
@@ -121,14 +130,12 @@ def mime_startswith(message, prefix):
     return False
 
 
-# ✅✅✅ تنظيف جديد: 7 أيام + حارس قرص (يحذف الأقدم أولاً عند امتلاء القرص فقط)
 async def cleanup_old_files():
     while True:
         try:
             await asyncio.sleep(600)
             current_time = time.time()
 
-            # 1) حذف القوائم الأقدم من 7 أيام
             for user_id, data in list(USER_FILES.items()):
                 if current_time - data.get("timestamp", 0) > RETAIN_SECONDS:
                     for file_path in data.get("files", []):
@@ -140,7 +147,6 @@ async def cleanup_old_files():
                     USER_FILES.pop(user_id, None)
                     print(f"🗑️ تنظيف قائمة منتهية (7 أيام) للمستخدم {user_id}")
 
-            # 2) حارس القرص: إذا المساحة قلت عن 1GB احذف الأقدم فالأقدم
             while free_gb("/") < MIN_FREE_GB and USER_FILES:
                 oldest_uid = min(USER_FILES.keys(),
                                  key=lambda u: USER_FILES[u].get("timestamp", 0))
@@ -153,6 +159,8 @@ async def cleanup_old_files():
                 USER_FILES.pop(oldest_uid, None)
                 print(f"⚠️ حارس القرص: حذفت قائمة المستخدم {oldest_uid} لتحرير مساحة")
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             print("cleanup_old_files error:", e)
 
@@ -246,6 +254,14 @@ async def run_cmd_with_progress(cmd, total_duration, msg, header_text="**Process
 
     await proc.wait()
     return proc.returncode
+
+
+@app.on_message(filters.private & filters.command(["ping"]))
+async def ping_cmd(client, message):
+    try:
+        await safe_reply(message, f"🏓 شغال | قرص فاضي: {free_gb():.1f}GB | قوائمك: {len(USER_FILES.get(message.from_user.id, {}).get('files', []))}")
+    except Exception as e:
+        print("ping error:", e)
 
 
 @app.on_message(filters.private & (filters.video | filters.document | filters.photo | filters.audio | filters.voice))
@@ -543,7 +559,6 @@ async def merge_media(client, message):
 
             list_txt = f"list_{user}.txt"
             out_merge = f"final_{user}.mp4"
-            success = False
 
             try:
                 total_dur = 0.0
@@ -593,7 +608,6 @@ async def merge_media(client, message):
 
                     USER_FILES[user]["files"] = []
                     update_user_timestamp(user)
-                    success = True
                     await safe_delete(msg)
 
                 else:
@@ -702,7 +716,8 @@ async def start_cmd(client, message):
             "• فيديوهات\n• صور\n• ملفات صوتية\n• مقاطع صوتية\n• GIFs\n\n"
             "📋 **/show** - عرض المقاطع\n"
             "🔗 **/merge** - دمج المقاطع\n"
-            "🗑️ **/clear** - حذف المقاطع"
+            "🗑️ **/clear** - حذف المقاطع\n"
+            "🏓 **/ping** - فحص الحالة"
         )
 
     except Exception as e:
@@ -713,19 +728,30 @@ async def main():
     cleanup_task = asyncio.create_task(cleanup_old_files())
 
     try:
-        await app.start()
-        print("🤖 بوت التجميع شغال | احتفاظ 7 أيام + حارس قرص")
+        connected = False
+        for attempt in range(1, 6):
+            try:
+                await app.start()
+                connected = True
+                print("✅ البوت متصل بتيليجرام بنجاح")
+                break
+            except Exception as e:
+                print(f"⚠️ محاولة اتصال {attempt}/5 فشلت: {e}")
+                await asyncio.sleep(10 * attempt)
+        if not connected:
+            raise SystemExit("❌ فشل الاتصال بتيليجرام بعد 5 محاولات — تحقق من التوكن/API")
+
+        me = await app.get_me()
+        print(f"🤖 بوت التجميع شغال باسم @{me.username} | احتفاظ 7 أيام + حارس قرص | قرص: {free_gb():.1f}GB")
         await idle()
     finally:
         cleanup_task.cancel()
-
         try:
             await cleanup_task
         except asyncio.CancelledError:
             pass
         except Exception:
             pass
-
         try:
             await app.stop()
         except Exception:
