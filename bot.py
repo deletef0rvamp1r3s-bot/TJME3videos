@@ -48,7 +48,9 @@ PROCESSING_USERS = set()
 
 RETAIN_SECONDS = 7 * 24 * 3600
 MIN_FREE_GB = 1.0
+MAX_UPLOAD_MB = 400
 
+# ✅✅✅ preset fast + إعدادات خفيفة الذاكرة (ref=1, me=dia, subme=2, trellis=0, threads=2)
 VIDEO_OPTS = [
     "-c:v", "libx264",
     "-preset", "fast",
@@ -63,8 +65,8 @@ VIDEO_OPTS = [
     "-maxrate", "6M",
     "-bufsize", "12M",
     "-video_track_timescale", "90000",
-    "-x264-params", "aq-mode=3:aq-strength=0.9:ref=2:me=hex:subme=4:trellis=1:threads=0",
-    "-max_muxing_queue_size", "1024",
+    "-x264-params", "aq-mode=3:aq-strength=0.9:ref=1:me=dia:subme=2:trellis=0:threads=2:rc-lookahead=10",
+    "-max_muxing_queue_size", "512",
     "-movflags", "+faststart"
 ]
 
@@ -129,6 +131,15 @@ def mime_startswith(message, prefix):
     except Exception:
         pass
     return False
+
+
+def oom_message():
+    return ("⚠️ **الملف معقد جداً لذاكرة الحاوية (Exit -9)**\n\n"
+            "نفدت الـ RAM أثناء المعالجة.\n\n"
+            "**الحلول:**\n"
+            "• ملف أصغر (أقل من 200MB)\n"
+            "• مدة أقصر (أقل من 5 دقائق)\n"
+            "• دقة أقل (720p بدل 1080p/4K)")
 
 
 @app.on_message(filters.private, group=-1)
@@ -289,19 +300,35 @@ async def process_media(client, message):
             return
 
         ext = ".mp4"
+        file_size = 0
 
         if message.photo:
             ext = ".jpg"
+            file_size = message.photo.file_size or 0
         elif message.voice:
             ext = ".ogg"
+            file_size = message.voice.file_size or 0
         elif message.audio:
             ext = os.path.splitext(message.audio.file_name or "audio.mp3")[1] or ".mp3"
+            file_size = message.audio.file_size or 0
         elif message.video and message.video.file_name:
             ext = os.path.splitext(message.video.file_name)[1] or ".mp4"
+            file_size = message.video.file_size or 0
+        elif message.video:
+            ext = ".mp4"
+            file_size = message.video.file_size or 0
         elif message.document and message.document.file_name:
             ext = os.path.splitext(message.document.file_name)[1] or ".mp4"
+            file_size = message.document.file_size or 0
+        elif message.document:
+            file_size = message.document.file_size or 0
 
         ext = ext or ".mp4"
+
+        # ✅ فحص الحجم قبل التحميل
+        if file_size and file_size > MAX_UPLOAD_MB * 1024 * 1024:
+            await safe_reply(message, f"❌ **الملف كبير جداً ({file_size / (1024*1024):.0f}MB)**\n\nالحد الأقصى {MAX_UPLOAD_MB}MB لتجنب أخطاء الذاكرة.")
+            return
 
         dl_name = f"dl_{message.id}_{user}{ext}"
         out_path = f"vid_{message.id}_{user}.mp4"
@@ -324,6 +351,11 @@ async def process_media(client, message):
 
                 if not dl_path or not os.path.exists(dl_path):
                     await safe_edit(msg, "❌ **فشل التحميل.**")
+                    return
+
+                real_size = os.path.getsize(dl_path)
+                if real_size > MAX_UPLOAD_MB * 1024 * 1024:
+                    await safe_edit(msg, f"❌ **الملف كبير جداً ({real_size / (1024*1024):.0f}MB)**\n\nالحد الأقصى {MAX_UPLOAD_MB}MB.")
                     return
 
                 original_duration = await get_duration_async(dl_path)
@@ -414,7 +446,10 @@ async def process_media(client, message):
 
                 returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة جودة عالية...**")
 
-                if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                # ✅✅✅ معالجة SIGKILL (-9 / 137) برسالة واضحة
+                if returncode in (-9, 137):
+                    await safe_edit(msg, oom_message())
+                elif returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                     USER_FILES[user]["files"].append(out_path)
                     update_user_timestamp(user)
                     success = True
@@ -464,6 +499,11 @@ async def process_gif(client, message):
             await safe_reply(message, "⏳ **جاري عملية أخرى، الرجاء الانتظار...**")
             return
 
+        file_size = message.animation.file_size or 0
+        if file_size and file_size > MAX_UPLOAD_MB * 1024 * 1024:
+            await safe_reply(message, f"❌ **الملف كبير جداً ({file_size / (1024*1024):.0f}MB)**\n\nالحد الأقصى {MAX_UPLOAD_MB}MB.")
+            return
+
         ext = os.path.splitext(message.animation.file_name or "animation.mp4")[1] or ".mp4"
 
         dl_name = f"anim_{message.id}_{user}{ext}"
@@ -511,7 +551,9 @@ async def process_gif(client, message):
 
                 returncode = await run_cmd_with_progress(cmd, duration, msg, "⚙️ **معالجة الـ GIF...**")
 
-                if returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                if returncode in (-9, 137):
+                    await safe_edit(msg, oom_message())
+                elif returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                     USER_FILES[user]["files"].append(out_path)
                     update_user_timestamp(user)
                     success = True
@@ -719,10 +761,11 @@ async def start_cmd(client, message):
             message,
             "🎬 **مرحباً بك في دمج الفيديوهات!**\n\n"
             "✨ **جودة مطابقة لبوت الحقوق:**\n"
-            "• CRF 18 سينمائي\n"
+            "• CRF 18 سينمائي + preset fast\n"
             "• 30fps ثابت سموذ\n"
             "• Denoise + Lanczos + Sharpening\n\n"
-            "📌 **قوائمك محفوظة 7 أيام** — تنمسح فقط بـ /merge أو /clear\n\n"
+            "📌 **قوائمك محفوظة 7 أيام** — تنمسح فقط بـ /merge أو /clear\n"
+            f"📦 الحد الأقصى للملف: {MAX_UPLOAD_MB}MB\n\n"
             "📤 أرسل لي:\n"
             "• فيديوهات\n• صور\n• ملفات صوتية\n• مقاطع صوتية\n• GIFs\n\n"
             "📋 **/show** - عرض المقاطع\n"
@@ -736,7 +779,6 @@ async def start_cmd(client, message):
 
 
 def _cleanup_worker():
-    """خيط تنظيف يعمل بجانب app.run()"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -746,7 +788,6 @@ def _cleanup_worker():
 
 
 def _bootstrap():
-    """مسح webhook + طباعة الرابط قبل التشغيل"""
     try:
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=false",
@@ -759,5 +800,4 @@ def _bootstrap():
 if __name__ == "__main__":
     _bootstrap()
     threading.Thread(target=_cleanup_worker, daemon=True).start()
-    # ✅ الطريقة الرسمية من Pyrogram — مضمونة 100%
     app.run()
