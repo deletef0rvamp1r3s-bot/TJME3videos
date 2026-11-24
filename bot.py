@@ -48,7 +48,7 @@ PROCESSING_USERS = set()
 
 RETAIN_SECONDS = 7 * 24 * 3600
 MIN_FREE_GB = 1.0
-MAX_UPLOAD_MB = 400
+MAX_UPLOAD_MB = 600
 
 # ✅✅✅ preset fast + إعدادات خفيفة الذاكرة (ref=1, me=dia, subme=2, trellis=0, threads=2)
 VIDEO_OPTS = [
